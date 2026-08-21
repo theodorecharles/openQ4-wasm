@@ -1,0 +1,10 @@
+# Exported symbol list for the macOS renderer modules (-Wl,-exported_symbols_list).
+#
+# Darwin peer of tools/build/linux_renderer_module.map. The macOS client keeps
+# its statically linked OpenGL renderer, so a loaded renderer module carries a
+# second copy of the renderer, idlib, imagetools and render_geo symbols. Only
+# the module entry point may be exported; anything else risks the two copies
+# interposing on each other at dlopen time.
+#
+# Leading underscore is the Mach-O C symbol decoration.
+_GetRenderAPI

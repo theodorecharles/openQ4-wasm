@@ -1,0 +1,1815 @@
+project(
+  'openQ4',
+  ['c', 'cpp'],
+  version: '0.1.010',
+  meson_version: '>=1.6.0',
+  default_options: ['c_std=c11', 'cpp_std=c++20', 'b_vscrt=static_from_buildtype'],
+)
+
+host_system = host_machine.system()
+host_cpu_family = host_machine.cpu_family()
+if not ['windows', 'linux', 'darwin'].contains(host_system)
+  error('Unsupported host system for openQ4 Meson build: ' + host_system)
+endif
+
+binary_arch = host_cpu_family
+if host_cpu_family == 'x86_64'
+  binary_arch = 'x64'
+elif host_cpu_family == 'x86'
+  binary_arch = 'x86'
+elif host_cpu_family == 'aarch64'
+  binary_arch = 'arm64'
+endif
+game_sp_binary_name = 'game-sp_' + binary_arch
+game_mp_binary_name = 'game-mp_' + binary_arch
+game_module_filename_suffix = '.so'
+if host_system == 'windows'
+  game_module_filename_suffix = '.dll'
+elif host_system == 'darwin'
+  game_module_filename_suffix = '.dylib'
+endif
+engine_client_binary_name = meson.project_name() + '-client_' + binary_arch
+engine_ded_binary_name = meson.project_name() + '-ded_' + binary_arch
+
+if host_cpu_family != 'x86_64' and not (host_system == 'linux' and host_cpu_family == 'aarch64')
+  warning(
+    'openQ4 currently targets x64 as the active compatibility baseline. '
+    + 'Non-x64 builds are considered experimental during platform bring-up.'
+  )
+endif
+
+platform_backend_requested = get_option('platform_backend')
+platform_backend = platform_backend_requested
+macos_graphics_bridge = get_option('macos_graphics_bridge')
+macos_openal_provider = get_option('macos_openal_provider')
+if host_system == 'windows' and platform_backend_requested == 'native'
+  error('platform_backend=native is only valid on non-Windows hosts.')
+endif
+
+if host_system != 'darwin' and macos_graphics_bridge != 'opengl'
+  error('macos_graphics_bridge=' + macos_graphics_bridge + ' is only valid on macOS hosts.')
+endif
+if host_system != 'darwin' and macos_openal_provider != 'apple_framework'
+  error('macos_openal_provider=' + macos_openal_provider + ' is only valid on macOS hosts.')
+endif
+
+if host_system == 'linux'
+  if platform_backend_requested == 'legacy_win32'
+    error('platform_backend=legacy_win32 is only valid on Windows hosts.')
+  endif
+elif host_system == 'darwin'
+  if platform_backend_requested == 'legacy_win32'
+    error('platform_backend=legacy_win32 is only valid on Windows hosts.')
+  endif
+  if macos_graphics_bridge == 'metal' and platform_backend_requested != 'sdl3'
+    error('macos_graphics_bridge=metal requires platform_backend=sdl3 so the bridge stays on the shared SDL3 path instead of the native Cocoa backend.')
+  endif
+  if platform_backend_requested == 'native'
+    warning(
+      'platform_backend=native on macOS is comparison-only diagnostic infrastructure. '
+      + 'Release packages use platform_backend=sdl3; do not treat the native Cocoa/OpenGL backend as supported release coverage.'
+    )
+  endif
+elif host_system != 'windows'
+  error('Unsupported host system for platform backend selection: ' + host_system)
+endif
+
+use_sdl3_backend = platform_backend == 'sdl3'
+use_macos_metal_bridge = host_system == 'darwin' and macos_graphics_bridge == 'metal'
+if host_system == 'windows' and not use_sdl3_backend
+  warning(
+    'legacy_win32 backend is transitional. '
+    + 'Use -Dplatform_backend=sdl3 for portability-focused development.'
+  )
+endif
+
+if host_system == 'windows'
+  # Windows commonly enables a non-functional Microsoft Store python3.exe
+  # application alias. Prefer the real python.exe launcher there.
+  py = find_program('python', 'python3', native: true, required: true)
+else
+  py = find_program('python3', 'python', native: true, required: true)
+endif
+fs_mod = import('fs')
+if host_system == 'darwin'
+  add_languages('objc', 'objcpp', required: true)
+  macos_deployment_target = '11.0'
+  add_project_arguments(
+    '-mmacosx-version-min=' + macos_deployment_target,
+    language: ['c', 'cpp', 'objc', 'objcpp'],
+  )
+  add_project_link_arguments(
+    '-mmacosx-version-min=' + macos_deployment_target,
+    language: ['c', 'cpp', 'objc', 'objcpp'],
+  )
+endif
+
+version_track = get_option('version_track').strip()
+version_iteration = get_option('version_iteration').strip()
+version_base_override = get_option('version_base_override').strip()
+openal_root_override = get_option('openal_root_override').strip()
+generated_version_header = meson.current_build_dir() / 'openq4_version_generated.h'
+version_metadata_command = [
+  py,
+  meson.project_source_root() / 'tools' / 'build' / 'openq4_version.py',
+  '--source-root',
+  meson.project_source_root(),
+  '--track',
+  version_track,
+  '--header-out',
+  generated_version_header,
+]
+if version_base_override != ''
+  version_metadata_command += ['--base-version', version_base_override]
+else
+  version_metadata_command += ['--base-version', meson.project_version()]
+endif
+if version_iteration != ''
+  version_metadata_command += ['--iteration', version_iteration]
+endif
+version_metadata_result = run_command(version_metadata_command, check: true)
+
+openq4_version_base = meson.project_version()
+openq4_version_short = meson.project_version()
+openq4_version_full = meson.project_version()
+openq4_version_tag = meson.project_version()
+openq4_product_version = meson.project_name() + ' ' + meson.project_version()
+openq4_product_version_full = openq4_product_version
+openq4_version_resource_dotted = meson.project_version() + '.0'
+openq4_git_sha = ''
+openq4_git_dirty = '0'
+openq4_commit_count = '0'
+root_include_dir = include_directories('.')
+
+foreach version_line : version_metadata_result.stdout().strip().split('\n')
+  if version_line == ''
+    continue
+  endif
+
+  version_pair = version_line.split('=')
+  if version_pair.length() != 2
+    continue
+  endif
+
+  version_key = version_pair[0]
+  version_value = version_pair[1]
+  if version_key == 'base_version'
+    openq4_version_base = version_value
+  elif version_key == 'version_short'
+    openq4_version_short = version_value
+  elif version_key == 'version'
+    openq4_version_full = version_value
+  elif version_key == 'version_tag'
+    openq4_version_tag = version_value
+  elif version_key == 'product_version'
+    openq4_product_version = version_value
+  elif version_key == 'product_version_full'
+    openq4_product_version_full = version_value
+  elif version_key == 'resource_dotted'
+    openq4_version_resource_dotted = version_value
+  elif version_key == 'git_sha'
+    openq4_git_sha = version_value
+  elif version_key == 'git_dirty'
+    openq4_git_dirty = version_value
+  elif version_key == 'commit_count'
+    openq4_commit_count = version_value
+  endif
+endforeach
+
+build_engine = get_option('build_engine')
+build_games = get_option('build_games')
+build_game_sp = get_option('build_game_sp')
+build_game_mp = get_option('build_game_mp')
+needs_game_headers = build_engine or build_games
+install_root_dir = meson.project_source_root() / '.install'
+install_game_dir = install_root_dir / 'baseoq4'
+game_libs_repo_root = ''
+game_libs_source_root = ''
+game_libs_repo_summary = 'not required'
+game_stage_root = ''
+game_stage_game_root = ''
+game_stage_mpgame_root = ''
+game_stage_game_include_rel = '.tmp/gamelibs_stage/src/game'
+game_stage_mpgame_include_rel = '.tmp/gamelibs_stage/src/mpgame'
+bse_source_root = meson.project_source_root() / 'src' / 'bse'
+game_sp_module_defs_file = ''
+game_mp_module_defs_file = ''
+
+if not build_engine and not build_games
+  error('At least one build target must be enabled. Use -Dbuild_engine=true and/or -Dbuild_games=true.')
+endif
+
+if get_option('build_native_tests')
+  openq4_core_safety_test = executable(
+    'openq4-core-safety-test',
+    files('tools/tests/native/CoreSafetyTest.cpp'),
+    include_directories: root_include_dir,
+    install: false,
+  )
+  test(
+    'openq4-core-safety',
+    openq4_core_safety_test,
+    timeout: 30,
+  )
+endif
+
+openq4_pak_files = []
+openq4_paks_generated_header = []
+if build_engine or build_games
+  openq4_pak_script_files = files(
+    'tools/build/openq4_pak.py',
+  )
+  openq4_pak_manifest_script_files = files(
+    'tools/build/write_pak_manifest.py',
+  )
+
+  openq4_pak0_source_manifest = custom_target(
+    'openq4_pak0_source_manifest',
+    output: 'pak0.sources',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'write_pak_manifest.py',
+      meson.project_source_root(),
+      'pak0.pk4',
+      'content/baseoq4/pak0',
+      '@OUTPUT@',
+    ],
+    depend_files: openq4_pak_script_files + openq4_pak_manifest_script_files,
+    build_always_stale: true,
+    build_by_default: true,
+  )
+  openq4_pak1_source_manifest = custom_target(
+    'openq4_pak1_source_manifest',
+    output: 'pak1.sources',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'write_pak_manifest.py',
+      meson.project_source_root(),
+      'pak1.pk4',
+      'content/baseoq4/pak1',
+      '@OUTPUT@',
+    ],
+    depend_files: openq4_pak_script_files + openq4_pak_manifest_script_files,
+    build_always_stale: true,
+    build_by_default: true,
+  )
+
+  openq4_pak0_output = custom_target(
+    'openq4_pak0',
+    input: openq4_pak0_source_manifest,
+    output: 'pak0.pk4',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'build_openq4_pack.py',
+      '--pak-name',
+      'pak0.pk4',
+      '--source-dir',
+      meson.project_source_root() / 'content' / 'baseoq4' / 'pak0',
+      '--manifest',
+      '@INPUT@',
+      '--out',
+      '@OUTPUT@',
+      '--stage-out',
+      meson.current_build_dir() / 'baseoq4' / 'pak0.pk4',
+    ],
+    depend_files: openq4_pak_script_files + files(
+      'tools/build/build_openq4_pack.py',
+    ),
+    build_by_default: true,
+    install: true,
+    install_dir: install_game_dir,
+  )
+  openq4_pak1_output = custom_target(
+    'openq4_pak1',
+    input: openq4_pak1_source_manifest,
+    output: 'pak1.pk4',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'build_openq4_pack.py',
+      '--pak-name',
+      'pak1.pk4',
+      '--source-dir',
+      meson.project_source_root() / 'content' / 'baseoq4' / 'pak1',
+      '--manifest',
+      '@INPUT@',
+      '--out',
+      '@OUTPUT@',
+      '--stage-out',
+      meson.current_build_dir() / 'baseoq4' / 'pak1.pk4',
+    ],
+    depend_files: openq4_pak_script_files + files(
+      'tools/build/build_openq4_pack.py',
+    ),
+    build_by_default: true,
+    install: true,
+    install_dir: install_game_dir,
+  )
+  openq4_paks_header_output = custom_target(
+    'openq4_paks_generated_header',
+    input: [openq4_pak0_output, openq4_pak1_output],
+    output: 'openq4_paks_generated.h',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'generate_pak_header.py',
+      '--pak0',
+      '@INPUT0@',
+      '--pak1',
+      '@INPUT1@',
+      '--header-out',
+      '@OUTPUT@',
+    ],
+    depend_files: openq4_pak_script_files + files(
+      'tools/build/generate_pak_header.py',
+    ),
+    build_by_default: true,
+    install: false,
+  )
+  openq4_pak_files = [openq4_pak0_output, openq4_pak1_output]
+  openq4_paks_generated_header = [openq4_paks_header_output]
+endif
+
+if needs_game_headers
+  game_libs_repo_discovery = run_command(
+    py,
+    '-c',
+    'import os, pathlib, sys; root = pathlib.Path(sys.argv[1]); raw = os.environ.get("OPENQ4_GAMELIBS_REPO", "").strip(); repo = pathlib.Path(raw) if raw else (root / ".." / "openQ4-game"); print(repo.resolve().as_posix())',
+    meson.project_source_root(),
+    check: true,
+  )
+  game_libs_repo_root = game_libs_repo_discovery.stdout().strip()
+  if game_libs_repo_root == ''
+    error('Failed to resolve the openQ4-game repository path. Set OPENQ4_GAMELIBS_REPO or place it at ../openQ4-game.')
+  endif
+
+  game_libs_source_root = game_libs_repo_root / 'src'
+  if not fs_mod.is_dir(game_libs_source_root / 'game')
+    error('openQ4-game source directory not found: ' + game_libs_source_root / 'game')
+  endif
+  if not fs_mod.is_dir(game_libs_source_root / 'mpgame')
+    error('openQ4-game multiplayer source directory not found: ' + game_libs_source_root / 'mpgame')
+  endif
+
+  game_stage_result = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'stage_gamelibs.py',
+    meson.project_source_root(),
+    game_libs_repo_root,
+    meson.project_source_root() / '.tmp' / 'gamelibs_stage',
+    check: true,
+  )
+  game_stage_root = game_stage_result.stdout().strip()
+  if game_stage_root == ''
+    error('Failed to stage game sources from openQ4-game.')
+  endif
+
+  game_stage_game_root = game_stage_root / 'src' / 'game'
+  if not fs_mod.is_dir(game_stage_game_root)
+    error('Staged game source directory not found: ' + game_stage_game_root)
+  endif
+  game_stage_mpgame_root = game_stage_root / 'src' / 'mpgame'
+  if not fs_mod.is_dir(game_stage_mpgame_root)
+    error('Staged multiplayer game source directory not found: ' + game_stage_mpgame_root)
+  endif
+  game_stage_manifest = game_stage_root / 'openq4_gamelibs_stage_manifest.json'
+  if not fs_mod.is_file(game_stage_manifest)
+    error('Staged openQ4-game source manifest not found: ' + game_stage_manifest)
+  endif
+
+  game_sp_module_defs_file = game_stage_game_root / 'Game.def'
+  game_mp_module_defs_file = game_stage_mpgame_root / 'mpgame.def'
+  if host_system == 'windows' and not fs_mod.is_file(game_sp_module_defs_file)
+    error('Staged Game.def not found: ' + game_sp_module_defs_file)
+  endif
+  if host_system == 'windows' and not fs_mod.is_file(game_mp_module_defs_file)
+    error('Staged mpgame.def not found: ' + game_mp_module_defs_file)
+  endif
+
+  game_libs_repo_summary = game_libs_repo_root
+endif
+
+if build_engine and not fs_mod.is_dir(bse_source_root)
+  error('Integrated BSE source directory not found: ' + bse_source_root)
+endif
+
+cc = meson.get_compiler('c')
+cpp = meson.get_compiler('cpp')
+
+linux_x11_dep = disabler()
+linux_xext_dep = disabler()
+linux_xxf86vm_dep = disabler()
+linux_gl_dep = disabler()
+linux_x11_helpers_enabled = false
+linux_x11_option = get_option('linux_x11')
+if build_engine and host_system == 'linux'
+  if linux_x11_option.disabled()
+    linux_gl_dep = cc.find_library('OpenGL', required: true)
+  else
+    linux_gl_dep = cc.find_library('OpenGL', required: false)
+    if not linux_gl_dep.found()
+      linux_gl_dep = cc.find_library('GL', required: true)
+    endif
+  endif
+  if use_sdl3_backend
+    if not linux_x11_option.disabled()
+      linux_x11_dep = dependency('x11', required: linux_x11_option)
+      linux_xext_dep = dependency('xext', required: linux_x11_option)
+      linux_x11_helpers_enabled = linux_x11_dep.found() and linux_xext_dep.found()
+    endif
+  else
+    if linux_x11_option.disabled()
+      error('linux_x11=disabled requires the SDL3 platform backend.')
+    endif
+    linux_x11_dep = dependency('x11', required: true)
+    linux_xext_dep = dependency('xext', required: true)
+    linux_xxf86vm_dep = dependency('xxf86vm', required: true)
+    linux_x11_helpers_enabled = true
+  endif
+endif
+
+# Phase B8 F3: on SDL3 Windows/Linux the client executable sheds the
+# statically linked renderer and always loads the renderer-gl module
+# ('gl' resolves to the module there). macOS and the legacy backends keep
+# the static renderer; the dedicated targets keep it everywhere until the
+# server front-end story changes.
+renderer_module_only_client = build_engine and get_option('build_renderer_gl') and use_sdl3_backend and (host_system == 'windows' or host_system == 'linux')
+# Phase B7: the Windows SDL3 ded keeps the renderer front-end but links no GL
+windows_gl_free_ded = build_engine and host_system == 'windows' and use_sdl3_backend
+
+engine_source_discovery = run_command(
+  py,
+  meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+  '--host-system',
+  host_system,
+  '--platform-backend',
+  platform_backend,
+  '--linux-x11-helpers',
+  linux_x11_helpers_enabled ? 'true' : 'false',
+  '--include-game',
+  'false',
+  '--renderer',
+  renderer_module_only_client ? 'module' : 'static',
+  check: true,
+)
+
+engine_source_paths = engine_source_discovery.stdout().strip().split('\n')
+if engine_source_paths.length() == 0
+  error('tools/build/meson_sources.py returned no engine source files.')
+endif
+
+dedicated_engine_source_paths = engine_source_paths
+if windows_gl_free_ded
+  # the Windows ded target keeps the static renderer (minus the GL link);
+  # discover its own list
+  dedicated_static_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+    '--host-system',
+    host_system,
+    '--platform-backend',
+    platform_backend,
+    '--linux-x11-helpers',
+    'false',
+    '--include-game',
+    'false',
+    '--renderer',
+    'static',
+    '--target-kind',
+    'dedicated',
+    check: true,
+  )
+  dedicated_engine_source_paths = dedicated_static_source_discovery.stdout().strip().split('\n')
+  if dedicated_engine_source_paths.length() == 0
+    error('tools/build/meson_sources.py returned no Windows dedicated source files.')
+  endif
+endif
+if host_system == 'linux'
+  dedicated_engine_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+    '--host-system',
+    host_system,
+    '--platform-backend',
+    platform_backend,
+    '--linux-x11-helpers',
+    'false',
+    '--include-game',
+    'false',
+    '--target-kind',
+    'dedicated',
+    check: true,
+  )
+  dedicated_engine_source_paths = dedicated_engine_source_discovery.stdout().strip().split('\n')
+  if dedicated_engine_source_paths.length() == 0
+    error('tools/build/meson_sources.py returned no Linux dedicated-server source files.')
+  endif
+endif
+
+imagetools_source_discovery = run_command(
+  py,
+  meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+  '--emit',
+  'imagetools',
+  check: true,
+)
+imagetools_source_paths = imagetools_source_discovery.stdout().strip().split('\n')
+if imagetools_source_paths.length() == 0
+  error('tools/build/meson_sources.py returned no imagetools source files.')
+endif
+openq4_imagetools_sources = files(imagetools_source_paths)
+
+render_geo_source_discovery = run_command(
+  py,
+  meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+  '--emit',
+  'render_geo',
+  check: true,
+)
+render_geo_source_paths = render_geo_source_discovery.stdout().strip().split('\n')
+if render_geo_source_paths.length() == 0
+  error('tools/build/meson_sources.py returned no render_geo source files.')
+endif
+openq4_render_geo_sources = files(render_geo_source_paths)
+
+renderer_gl_source_discovery = run_command(
+  py,
+  meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+  '--emit',
+  'renderer_gl',
+  check: true,
+)
+renderer_gl_source_paths = renderer_gl_source_discovery.stdout().strip().split('\n')
+if renderer_gl_source_paths.length() == 0
+  error('tools/build/meson_sources.py returned no renderer_gl source files.')
+endif
+openq4_renderer_gl_sources = files(renderer_gl_source_paths)
+
+openq4_engine_sources = files(engine_source_paths)
+if build_engine
+  openq4_engine_sources += openq4_paks_generated_header
+endif
+
+game_sp_sources = []
+game_mp_sources = []
+game_sources = []
+bse_sources = []
+game_idlib_sources = []
+if build_games
+  game_sp_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'list_sources.py',
+    game_stage_root,
+    'src/game',
+    'src/game/Callbacks.cpp',
+    'src/game/gamesys/Callbacks.cpp',
+    check: true,
+  )
+  game_sp_source_paths = game_sp_source_discovery.stdout().strip().split('\n')
+  if game_sp_source_paths.length() == 0
+    error('tools/build/list_sources.py returned no single-player game source files.')
+  endif
+
+  game_sp_absolute_paths = []
+  foreach rel_path : game_sp_source_paths
+    game_sp_absolute_paths += [game_stage_root / rel_path]
+  endforeach
+  game_sp_sources = files(game_sp_absolute_paths)
+
+  game_mp_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'list_sources.py',
+    game_stage_root,
+    'src/mpgame',
+    'src/mpgame/Callbacks.cpp',
+    'src/mpgame/gamesys/Callbacks.cpp',
+    check: true,
+  )
+  game_mp_source_paths = game_mp_source_discovery.stdout().strip().split('\n')
+  if game_mp_source_paths.length() == 0
+    error('tools/build/list_sources.py returned no multiplayer game source files.')
+  endif
+
+  game_mp_absolute_paths = []
+  foreach rel_path : game_mp_source_paths
+    game_mp_absolute_paths += [game_stage_root / rel_path]
+  endforeach
+  game_mp_sources = files(game_mp_absolute_paths)
+  game_sources = game_sp_sources + game_mp_sources
+
+  savegame_compat_header = custom_target(
+    'openq4_savegame_compat_generated',
+    output: 'openq4_savegame_compat_generated.h',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'generate_savegame_compat_header.py',
+      '--project-root',
+      meson.project_source_root(),
+      '--game-stage-root',
+      game_stage_root,
+      '--header-out',
+      '@OUTPUT@',
+    ],
+    depend_files: files(engine_source_paths) + game_sources + files(dedicated_engine_source_paths) + files(
+      'tools/build/generate_savegame_compat_header.py',
+    ),
+    install: false,
+  )
+  game_sp_sources += [savegame_compat_header]
+  game_mp_sources += [savegame_compat_header]
+  if build_engine
+    # Session preflights the exact GameLibs source stamp before tearing down
+    # the active map, so the engine target must see the same generated header.
+    openq4_engine_sources += [savegame_compat_header]
+  endif
+endif
+
+if build_engine
+  bse_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'list_sources.py',
+    meson.project_source_root(),
+    'src/bse',
+    check: true,
+  )
+  bse_source_paths = bse_source_discovery.stdout().strip().split('\n')
+  if bse_source_paths.length() == 0
+    error('tools/build/list_sources.py returned no BSE source files.')
+  endif
+  bse_sources = files(bse_source_paths)
+endif
+
+if build_engine or build_games
+  game_idlib_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'list_sources.py',
+    meson.project_source_root(),
+    'src/idlib',
+    'src/idlib/math/Simd_AltiVec.cpp',
+    check: true,
+  )
+  game_idlib_paths = game_idlib_discovery.stdout().strip().split('\n')
+  if game_idlib_paths.length() == 0
+    error('tools/build/list_sources.py returned no game idlib source files.')
+  endif
+  game_idlib_sources = files(game_idlib_paths)
+endif
+
+resource_compiler = find_program('rc', 'windres', required: false)
+openq4_version_resources = []
+if host_system == 'windows' and resource_compiler.found()
+  windows_mod = import('windows')
+  openq4_version_resources = windows_mod.compile_resources(
+    'src/sys/win32/rc/openQ4Version.rc',
+    include_directories: [root_include_dir],
+  )
+  openq4_engine_sources += openq4_version_resources
+endif
+
+is_msvc = cc.get_id() == 'msvc' and cpp.get_id() == 'msvc'
+msvc_2026_min = '19.46.0'
+if is_msvc
+  if cpp.version().version_compare('<' + msvc_2026_min)
+    msvc_2026_msg = 'MSVC 19.46+ (Visual Studio 2026 toolset baseline) is recommended. Detected: ' + cpp.version() + '.'
+    if get_option('enforce_msvc_2026')
+      error(msvc_2026_msg)
+    else
+      warning(msvc_2026_msg + ' Configure with -Denforce_msvc_2026=true to enforce this baseline.')
+    endif
+  endif
+elif get_option('enforce_msvc_2026')
+  warning('enforce_msvc_2026 is only meaningful when using the MSVC toolchain.')
+endif
+
+fallback_opt = ['default_library=static']
+glew_default_options = fallback_opt
+sdl3_default_options = fallback_opt
+if host_system == 'linux' and use_sdl3_backend
+  glew_default_options += ['openq4_sdl3_loader=true']
+  if linux_x11_option.disabled()
+    sdl3_default_options += ['x11=disabled']
+  elif linux_x11_option.enabled()
+    sdl3_default_options += ['x11=enabled']
+  else
+    sdl3_default_options += ['x11=auto']
+  endif
+endif
+
+glew_dep = disabler()
+glew_dedicated_dep = disabler()
+stb_vorbis_dep = disabler()
+openal_dep = disabler()
+sdl3_dep = disabler()
+macos_graphics_bridge_dep = disabler()
+deps = []
+if build_engine
+  if host_system == 'linux' and use_sdl3_backend
+    glew_sp = subproject('glew', default_options: glew_default_options)
+    glew_dep = glew_sp.get_variable('glew_dep')
+    glew_dedicated_dep = glew_sp.get_variable('glew_dedicated_dep')
+  else
+    glew_dep = dependency(
+      'glew',
+      required: true,
+      fallback: ['glew', 'glew_dep'],
+      default_options: glew_default_options,
+    )
+    if host_system == 'linux' or host_system == 'windows' or host_system == 'darwin'
+      # darwin needs it for the MoltenVK-backed Vulkan renderer module, which
+      # links no GL but shares front-end translation units that reference it
+      glew_dedicated_sp = subproject('glew', default_options: glew_default_options)
+      glew_dedicated_dep = glew_dedicated_sp.get_variable('glew_dedicated_dep')
+    endif
+  endif
+
+  stb_vorbis_dep = dependency(
+    'stb_vorbis',
+    required: true,
+    fallback: ['stb_vorbis', 'stb_vorbis_dep'],
+    default_options: fallback_opt,
+  )
+
+  if host_system == 'darwin'
+    if macos_openal_provider == 'apple_framework'
+      openal_dep = dependency('appleframeworks', modules: ['OpenAL'], required: true)
+    else
+      # The migration provider specifically means an OpenAL Soft-style system
+      # package. Meson's generic OpenAL lookup may otherwise fall back to
+      # Apple's framework when pkg-config cannot see a keg-only Homebrew
+      # install, while the compile defines below still select AL/... headers.
+      # Fail during configure instead of combining framework libraries with
+      # incompatible OpenAL Soft headers (GitHub issue #94).
+      openal_dep = dependency('openal', required: true, method: 'pkg-config')
+    endif
+  else
+    if host_system == 'windows' and openal_root_override != ''
+      openal_override_root = openal_root_override
+      openal_override_include_dir = openal_override_root / 'include'
+      if cc.get_argument_syntax() == 'msvc'
+        openal_override_include_args = ['/I', openal_override_include_dir]
+      else
+        openal_override_include_args = ['-I', openal_override_include_dir]
+      endif
+      openal_override_lib = cc.find_library(
+        'OpenAL32',
+        dirs: [openal_override_root / 'lib'],
+        required: true,
+      )
+      openal_dep = declare_dependency(
+        compile_args: openal_override_include_args,
+        dependencies: [openal_override_lib],
+      )
+    else
+      openal_dep = dependency(
+        'openal',
+        required: true,
+        fallback: ['openal-soft-prebuilt', 'openal_dep'],
+        default_options: fallback_opt,
+      )
+    endif
+  endif
+
+  if use_sdl3_backend
+    if host_system == 'linux' and not linux_x11_option.auto()
+      # A system SDL's compiled video-driver set cannot be changed by a Meson
+      # feature option. Explicit linux_x11 modes therefore select the bundled
+      # SDL so enabled/disabled is a real build contract rather than a hint
+      # that silently depends on the distribution's SDL configuration.
+      sdl3_subproject = subproject('sdl3', default_options: sdl3_default_options)
+      sdl3_dep = sdl3_subproject.get_variable('sdl3_dep')
+    else
+      sdl3_dep = dependency(
+        'sdl3',
+        version: '>=3.4.4',
+        required: true,
+        fallback: ['sdl3', 'sdl3_dep'],
+        default_options: sdl3_default_options,
+      )
+    endif
+  endif
+
+  deps = [glew_dep, openal_dep, stb_vorbis_dep]
+
+  if host_system == 'windows'
+    deps += [
+      cc.find_library('opengl32', required: true),
+      cc.find_library('Dbghelp', required: true),
+      cc.find_library('bcrypt', required: true),
+      cc.find_library('Iphlpapi', required: true),
+      cc.find_library('Winmm', required: true),
+      cc.find_library('ws2_32', required: true),
+    ]
+
+    if use_sdl3_backend
+      deps += [sdl3_dep]
+    else
+      deps += [
+        cc.find_library('dinput8', required: true),
+        cc.find_library('dxguid', required: true),
+      ]
+    endif
+  elif host_system == 'linux'
+    deps += [
+      dependency('threads', required: true),
+      cc.find_library('dl', required: true),
+      linux_gl_dep,
+    ]
+    if use_sdl3_backend
+      deps += [sdl3_dep]
+      if linux_x11_helpers_enabled
+        deps += [linux_x11_dep, linux_xext_dep]
+      endif
+    else
+      deps += [linux_x11_dep, linux_xext_dep, linux_xxf86vm_dep]
+    endif
+  elif host_system == 'darwin'
+    if use_macos_metal_bridge
+      macos_graphics_bridge_dep = dependency(
+        'appleframeworks',
+        modules: ['Metal', 'QuartzCore'],
+        required: true,
+      )
+    endif
+    macos_framework_modules = ['Cocoa', 'OpenGL', 'ApplicationServices']
+    if not use_sdl3_backend
+      macos_framework_modules += ['Carbon']
+    endif
+    deps += [
+      dependency('threads', required: true),
+      dependency(
+        'appleframeworks',
+        modules: macos_framework_modules,
+        required: true,
+      ),
+    ]
+    if use_sdl3_backend
+      deps += [sdl3_dep]
+    endif
+    if use_macos_metal_bridge
+      deps += [macos_graphics_bridge_dep]
+    endif
+  endif
+endif
+
+client_deps = deps
+if renderer_module_only_client
+  # the module-only client compiles against GLEW declarations (via qgl.h in
+  # the precompiled header) but links no GL: the renderer-gl module carries
+  # GLEW/opengl32/libGL itself
+  glew_headers_dep = glew_dep.partial_dependency(
+    compile_args: true,
+    includes: true,
+  )
+  client_deps = [glew_headers_dep, openal_dep, stb_vorbis_dep]
+  if host_system == 'windows'
+    client_deps += [
+      cc.find_library('Dbghelp', required: true),
+      cc.find_library('bcrypt', required: true),
+      cc.find_library('Iphlpapi', required: true),
+      cc.find_library('Winmm', required: true),
+      cc.find_library('ws2_32', required: true),
+      sdl3_dep,
+    ]
+  else
+    client_deps += [
+      dependency('threads', required: true),
+      cc.find_library('dl', required: true),
+      sdl3_dep,
+    ]
+    if linux_x11_helpers_enabled
+      client_deps += [linux_x11_dep, linux_xext_dep]
+    endif
+  endif
+endif
+
+dedicated_deps = deps
+if windows_gl_free_ded
+  # Phase B7: the Windows ded keeps the renderer front-end but links no GL:
+  # opengl32 is dropped, GLEW builds in its hook-resolving dedicated flavor,
+  # and src/sys/stub/stub_gl_win.cpp satisfies the surviving GL 1.1 refs
+  dedicated_deps = [
+    glew_dedicated_dep,
+    openal_dep,
+    stb_vorbis_dep,
+    cc.find_library('Dbghelp', required: true),
+    cc.find_library('bcrypt', required: true),
+    cc.find_library('Iphlpapi', required: true),
+    cc.find_library('Winmm', required: true),
+    cc.find_library('ws2_32', required: true),
+    sdl3_dep,
+  ]
+endif
+if build_engine and host_system == 'linux'
+  # Keep compile-time OpenAL declarations and the static GLEW/vorbis code used
+  # by the common engine sources, but give the dedicated target no client-side
+  # audio, graphics, window-system, or SDL link dependency.
+  openal_headers_dep = openal_dep.partial_dependency(
+    compile_args: true,
+    includes: true,
+  )
+  dedicated_deps = [
+    glew_dedicated_dep,
+    openal_headers_dep,
+    stb_vorbis_dep,
+    dependency('threads', required: true),
+    cc.find_library('dl', required: true),
+  ]
+endif
+
+shared_cpp_args = ['-DUSE_OPENAL', '-DGLEW_NO_GLU']
+shared_c_args = ['-DGLEW_NO_GLU']
+shared_objcpp_args = []
+shared_objc_args = []
+engine_link_args = []
+linux_executable_pie = false
+linux_module_link_hardening_args = []
+linux_cross_dso_sanitizer_cpp_args = []
+
+if host_system == 'windows'
+  shared_cpp_args += ['-D_WINDOWS', '-DWIN32']
+  shared_c_args += ['-D_WINDOWS', '-DWIN32']
+  engine_link_args += ['/STACK:16777216,16777216']
+else
+  shared_cpp_args += ['-DID_GL_HARDLINK']
+  shared_c_args += ['-DID_GL_HARDLINK']
+endif
+
+if host_system == 'darwin'
+  shared_cpp_args += ['-DMACOS_X=1']
+  shared_c_args += ['-DMACOS_X=1']
+  if macos_openal_provider == 'system'
+    shared_cpp_args += ['-DUSE_OPENAL_SOFT_INCLUDES=1']
+    shared_c_args += ['-DUSE_OPENAL_SOFT_INCLUDES=1']
+  endif
+  macos_compile_hardening_args = []
+  foreach hardening_arg : ['-fstack-protector-strong', '-D_FORTIFY_SOURCE=2']
+    if cpp.has_argument(hardening_arg) and cc.has_argument(hardening_arg)
+      macos_compile_hardening_args += hardening_arg
+    endif
+  endforeach
+  shared_cpp_args += macos_compile_hardening_args
+  shared_c_args += macos_compile_hardening_args
+
+  macos_link_hardening_args = []
+  foreach hardening_arg : ['-Wl,-pie', '-Wl,-dead_strip', '-Wl,-headerpad_max_install_names']
+    if cpp.has_link_argument(hardening_arg)
+      macos_link_hardening_args += hardening_arg
+    endif
+  endforeach
+  engine_link_args += macos_link_hardening_args
+
+  if use_macos_metal_bridge
+    shared_cpp_args += ['-DOPENQ4_MACOS_METAL_BRIDGE=1']
+    shared_c_args += ['-DOPENQ4_MACOS_METAL_BRIDGE=1']
+    shared_objcpp_args += ['-DOPENQ4_MACOS_METAL_BRIDGE=1']
+    shared_objc_args += ['-DOPENQ4_MACOS_METAL_BRIDGE=1']
+  endif
+endif
+
+if host_system == 'linux'
+  linux_compile_hardening_args = []
+  foreach hardening_arg : ['-fstack-protector-strong', '-D_FORTIFY_SOURCE=2']
+    if cpp.has_argument(hardening_arg) and cc.has_argument(hardening_arg)
+      linux_compile_hardening_args += hardening_arg
+    endif
+  endforeach
+  shared_cpp_args += linux_compile_hardening_args
+  shared_c_args += linux_compile_hardening_args
+
+  if cpp.has_argument('-fno-sanitize=vptr')
+    # Engine, game, and in-process BSE translation units consume polymorphic
+    # interfaces whose key functions and RTTI live on the opposite side of a
+    # runtime-loaded module boundary. UBSan's vptr metadata cannot be resolved
+    # while preserving the executable/module ABI and each module's -z defs contract.
+    # Keep AddressSanitizer and every other requested UBSan check enabled.
+    linux_cross_dso_sanitizer_cpp_args += ['-fno-sanitize=vptr']
+  endif
+
+  linux_link_hardening_args = []
+  foreach hardening_arg : ['-Wl,-z,relro', '-Wl,-z,now', '-Wl,-z,noexecstack']
+    if cpp.has_link_argument(hardening_arg)
+      linux_link_hardening_args += hardening_arg
+    endif
+  endforeach
+  engine_link_args += linux_link_hardening_args
+  linux_module_link_hardening_args += linux_link_hardening_args
+  linux_executable_pie = cpp.has_argument('-fPIE') and cc.has_argument('-fPIE') and cpp.has_link_argument('-pie')
+endif
+
+if use_sdl3_backend
+  shared_cpp_args += ['-DUSE_SDL3=1']
+  shared_c_args += ['-DUSE_SDL3=1']
+endif
+
+if host_system == 'linux' and use_sdl3_backend and linux_x11_helpers_enabled
+  shared_cpp_args += ['-DOPENQ4_HAVE_X11_HELPERS=1']
+  shared_c_args += ['-DOPENQ4_HAVE_X11_HELPERS=1']
+endif
+
+if cpp.get_argument_syntax() == 'msvc'
+  shared_cpp_args += [
+    '/J',
+    '/FS',
+    '/source-charset:windows-1252',
+    '/execution-charset:windows-1252',
+    '/Zc:strictStrings-',
+    '/we4302', # pointer truncation
+    '/we4311', # pointer truncation through an integer
+    '/we4312', # integer widened to a pointer
+  ]
+  # MSVC warning numbers are not portable to clang-cl even though it accepts
+  # MSVC-style arguments. Keep this narrow gate on the validated MSVC x64 lane.
+  if is_msvc and host_cpu_family == 'x86_64'
+    cleaned_windows_x64_warning_errors = [
+      '/we4101', # unreferenced local variable
+      '/we4189', # local variable initialized but not referenced
+      '/we4267', # size_t conversion may lose data
+      '/we4324', # structure padded due to alignment
+      '/we4505', # unreferenced local function removed
+    ]
+    shared_cpp_args += cleaned_windows_x64_warning_errors
+  endif
+  shared_c_args += ['/FS', '/source-charset:windows-1252', '/execution-charset:windows-1252']
+
+  # Keep narrowly scoped suppressions for legacy C/C++ constructs. Pointer/
+  # integer size diagnostics remain enabled so Win64 truncations cannot hide.
+  msvc_suppressed_warnings = [
+    '/wd4091', # typedef enum pattern without declarator
+    '/wd4305', # double -> float literal truncation
+    '/wd4838', # narrowing in legacy list constructors
+    '/wd5033', # register keyword used in imported legacy code
+    '/wd5055', # enum/float comparison in legacy declarations
+  ]
+  shared_cpp_args += msvc_suppressed_warnings
+  shared_c_args += msvc_suppressed_warnings
+else
+  # Legacy idTech4-era code relies on implicit narrowing/pointer casts that
+  # modern GCC/Clang reject as hard errors without permissive mode.
+  shared_cpp_args += ['-fpermissive']
+  foreach aliasing_arg : ['-fno-strict-aliasing']
+    if cpp.has_argument(aliasing_arg) and cc.has_argument(aliasing_arg)
+      shared_cpp_args += aliasing_arg
+      shared_c_args += aliasing_arg
+    endif
+  endforeach
+  # GCC/Clang default to -ffp-contract=fast, which fuses a*b+c into an FMA
+  # wherever the target has one. AArch64 always does; the x86-64 SSE2 baseline
+  # openQ4 is validated against does not. That makes identical source produce
+  # different float results per architecture in collision, AAS and physics
+  # code, which is exactly the class of divergence behind arm64-only map and
+  # savegame failures. MSVC already defaults to precise contraction.
+  foreach fp_arg : ['-ffp-contract=off']
+    if cpp.has_argument(fp_arg) and cc.has_argument(fp_arg)
+      shared_cpp_args += fp_arg
+      shared_c_args += fp_arg
+    endif
+  endforeach
+  # src/idlib/Lib.h keys assert()/verify() off _DEBUG, which MSVC supplies via
+  # /MTd but GCC and Clang never do here, so idlib's ownership and alignment
+  # checks are dead on Linux and macOS unless this is asked for.
+  if get_option('idlib_asserts')
+    shared_cpp_args += ['-DOPENQ4_ENABLE_IDLIB_ASSERTS=1']
+    shared_c_args += ['-DOPENQ4_ENABLE_IDLIB_ASSERTS=1']
+  endif
+endif
+
+if host_system == 'darwin'
+  shared_objcpp_args = shared_cpp_args
+  shared_objc_args = shared_c_args
+endif
+
+pch_headers = []
+game_idlib_pch_headers = []
+game_module_pch_headers = []
+common_header_cpp_args = []
+common_header_path = meson.project_source_root() / 'src' / 'idlib' / 'precompiled.h'
+if get_option('use_pch')
+  pch_headers = ['src/idlib/precompiled.h']
+  game_idlib_pch_headers = ['src/idlib/precompiled.h']
+  game_module_pch_headers = [common_header_path]
+else
+  # The legacy engine and SDK sources use precompiled.h as their common
+  # translation-unit prefix. Disabling compiler PCH generation must include
+  # the same declarations normally rather than silently changing the source
+  # contract and producing hundreds of order-dependent compile failures.
+  if cpp.get_argument_syntax() == 'msvc'
+    common_header_cpp_args = ['/FI' + common_header_path]
+  else
+    common_header_cpp_args = ['-include', common_header_path]
+  endif
+endif
+
+src_include_dir = include_directories('src')
+src_idlib_include_dir = include_directories('src/idlib')
+src_renderer_include_dir = include_directories('src/renderer')
+src_ui_include_dir = include_directories('src/ui')
+src_sys_include_dir = include_directories('src/sys')
+src_bse_include_dir = include_directories('src/bse')
+src_maya_import_include_dir = include_directories('src/MayaImport')
+game_include_dirs = [
+  root_include_dir,
+  src_include_dir,
+  src_idlib_include_dir,
+  src_renderer_include_dir,
+  src_ui_include_dir,
+  src_sys_include_dir,
+  src_bse_include_dir,
+  src_maya_import_include_dir,
+]
+engine_include_dirs = [root_include_dir, src_include_dir]
+game_idlib_include_dirs = [root_include_dir, src_include_dir]
+game_idlib_mp_include_dirs = [root_include_dir, src_include_dir]
+bse_client_include_dirs = [root_include_dir, src_include_dir, src_bse_include_dir]
+
+if needs_game_headers
+  staged_game_include_dir = include_directories(game_stage_game_include_rel)
+  staged_mpgame_include_dir = include_directories(game_stage_mpgame_include_rel)
+  engine_include_dirs += [staged_game_include_dir]
+  game_idlib_include_dirs += [staged_game_include_dir]
+  # the multiplayer idlib flavour resolves precompiled.h's
+  # "../mpgame/Game_local.h" through the staged mpgame tree
+  game_idlib_mp_include_dirs += [staged_mpgame_include_dir, staged_game_include_dir]
+  game_include_dirs += [staged_game_include_dir, staged_mpgame_include_dir]
+  bse_client_include_dirs += [staged_game_include_dir]
+endif
+
+engine_cpp_args = shared_cpp_args + common_header_cpp_args + ['-D__DOOM_DLL__'] + linux_cross_dso_sanitizer_cpp_args
+engine_c_args = shared_c_args
+# client-only flavor: module-only clients compile the loader/backend for the
+# shed-renderer shape (dedicated and library targets stay static-shaped)
+client_engine_cpp_args = engine_cpp_args
+if renderer_module_only_client
+  client_engine_cpp_args += ['-DOPENQ4_RENDERER_MODULE_ONLY']
+endif
+engine_objcpp_args = shared_objcpp_args + ['-D__DOOM_DLL__']
+engine_objc_args = shared_objc_args
+bse_cpp_args = shared_cpp_args + common_header_cpp_args + linux_cross_dso_sanitizer_cpp_args
+bse_c_args = shared_c_args
+bse_library = disabler()
+
+if build_engine
+  openq4_dedicated_sources = openq4_engine_sources
+  if windows_gl_free_ded
+    # ded keeps the static renderer while the client sheds it
+    openq4_dedicated_sources = files(dedicated_engine_source_paths)
+    openq4_dedicated_sources += openq4_paks_generated_header
+    if build_games
+      openq4_dedicated_sources += [savegame_compat_header]
+    endif
+    openq4_dedicated_sources += openq4_version_resources
+  endif
+  if host_system == 'linux'
+    openq4_dedicated_sources = files(dedicated_engine_source_paths)
+    openq4_dedicated_sources += openq4_paks_generated_header
+    if build_games
+      openq4_dedicated_sources += [savegame_compat_header]
+    endif
+  endif
+
+  bse_library = static_library(
+    'openq4_bse',
+    bse_sources,
+    include_directories: bse_client_include_dirs,
+    cpp_args: bse_cpp_args,
+    c_args: bse_c_args,
+    cpp_pch: pch_headers,
+    pic: host_system == 'linux',
+    install: false,
+  )
+
+  # CPU image utilities shared between the engine and (post module-split) the
+  # renderer modules; compiled with engine args so codegen matches the
+  # pre-carve statically-linked behavior
+  imagetools_library = static_library(
+    'openq4_imagetools',
+    openq4_imagetools_sources,
+    include_directories: engine_include_dirs,
+    cpp_args: engine_cpp_args,
+    c_args: engine_c_args,
+    cpp_pch: pch_headers,
+    pic: host_system == 'linux',
+    install: false,
+  )
+
+  # CPU render-geometry shared between dmap (engine) and the renderer;
+  # compiled with engine args so codegen matches the pre-carve build
+  render_geo_library = static_library(
+    'openq4_render_geo',
+    openq4_render_geo_sources,
+    include_directories: engine_include_dirs,
+    cpp_args: engine_cpp_args,
+    c_args: engine_c_args,
+    cpp_pch: pch_headers,
+    pic: host_system == 'linux',
+    install: false,
+  )
+endif
+
+if build_engine
+  client_link_with = [bse_library, imagetools_library, render_geo_library]
+  dedicated_link_with = [bse_library, imagetools_library, render_geo_library]
+
+  if host_system == 'windows'
+    executable(
+      engine_client_binary_name,
+      openq4_engine_sources,
+      include_directories: engine_include_dirs,
+      dependencies: client_deps,
+      link_with: client_link_with,
+      cpp_args: client_engine_cpp_args,
+      c_args: engine_c_args,
+      cpp_pch: pch_headers,
+      win_subsystem: 'windows',
+      link_args: engine_link_args,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  elif host_system == 'darwin'
+    executable(
+      engine_client_binary_name,
+      openq4_engine_sources,
+      include_directories: engine_include_dirs,
+      dependencies: client_deps,
+      link_with: client_link_with,
+      cpp_args: client_engine_cpp_args,
+      c_args: engine_c_args,
+      objcpp_args: engine_objcpp_args,
+      objc_args: engine_objc_args,
+      cpp_pch: pch_headers,
+      link_args: engine_link_args,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  else
+    executable(
+      engine_client_binary_name,
+      openq4_engine_sources,
+      include_directories: engine_include_dirs,
+      dependencies: client_deps,
+      link_with: client_link_with,
+      cpp_args: client_engine_cpp_args,
+      c_args: engine_c_args,
+      cpp_pch: pch_headers,
+      link_args: engine_link_args,
+      pie: linux_executable_pie,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  endif
+
+  dedicated_engine_cpp_args = engine_cpp_args
+  dedicated_engine_c_args = engine_c_args
+  if host_system == 'linux'
+    dedicated_engine_cpp_args = []
+    foreach arg : engine_cpp_args
+      if not ['-DUSE_SDL3=1', '-DOPENQ4_HAVE_X11_HELPERS=1'].contains(arg)
+        dedicated_engine_cpp_args += arg
+      endif
+    endforeach
+    dedicated_engine_c_args = []
+    foreach arg : engine_c_args
+      if not ['-DUSE_SDL3=1', '-DOPENQ4_HAVE_X11_HELPERS=1'].contains(arg)
+        dedicated_engine_c_args += arg
+      endif
+    endforeach
+  endif
+
+  dedicated_cpp_args = dedicated_engine_cpp_args + ['-DID_DEDICATED']
+  dedicated_c_args = dedicated_engine_c_args + ['-DID_DEDICATED']
+  if windows_gl_free_ded
+    # GLAPI=extern strips the dllimport decoration from GLEW's GL 1.1
+    # declarations so the dedicated GL stub's plain definitions link cleanly
+    dedicated_cpp_args += ['-DGLAPI=extern']
+    dedicated_c_args += ['-DGLAPI=extern']
+  endif
+  dedicated_objcpp_args = engine_objcpp_args + ['-DID_DEDICATED']
+  dedicated_objc_args = engine_objc_args + ['-DID_DEDICATED']
+
+  if host_system == 'windows'
+    executable(
+      engine_ded_binary_name,
+      openq4_dedicated_sources,
+      include_directories: engine_include_dirs,
+      dependencies: dedicated_deps,
+      link_with: dedicated_link_with,
+      cpp_args: dedicated_cpp_args,
+      c_args: dedicated_c_args,
+      cpp_pch: pch_headers,
+      win_subsystem: 'windows',
+      link_args: engine_link_args,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  elif host_system == 'darwin'
+    executable(
+      engine_ded_binary_name,
+      openq4_dedicated_sources,
+      include_directories: engine_include_dirs,
+      dependencies: dedicated_deps,
+      link_with: dedicated_link_with,
+      cpp_args: dedicated_cpp_args,
+      c_args: dedicated_c_args,
+      objcpp_args: dedicated_objcpp_args,
+      objc_args: dedicated_objc_args,
+      cpp_pch: pch_headers,
+      link_args: engine_link_args,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  else
+    executable(
+      engine_ded_binary_name,
+      openq4_dedicated_sources,
+      include_directories: engine_include_dirs,
+      dependencies: dedicated_deps,
+      link_with: dedicated_link_with,
+      cpp_args: dedicated_cpp_args,
+      c_args: dedicated_c_args,
+      cpp_pch: pch_headers,
+      link_args: engine_link_args,
+      pie: linux_executable_pie,
+      install: true,
+      install_dir: install_root_dir,
+    )
+  endif
+endif
+
+game_common_cpp_args = shared_cpp_args + common_header_cpp_args + ['-DGAME_DLL'] + linux_cross_dso_sanitizer_cpp_args
+game_common_c_args = shared_c_args
+game_target_override_options = ['cpp_std=c++17']
+game_module_link_args = []
+game_module_link_depends = []
+if host_system == 'windows'
+  game_module_link_args = ['/FIXED:NO', '/LARGEADDRESSAWARE']
+  if ['x86_64', 'aarch64'].contains(host_cpu_family)
+    game_module_link_args += ['/BASE:0x180000000']
+  else
+    game_module_link_args += ['/BASE:0x20000000']
+  endif
+  release_like = ['release', 'debugoptimized', 'minsize'].contains(get_option('buildtype'))
+  if release_like
+    game_module_link_args += ['/STACK:4194304', '/OPT:REF', '/OPT:ICF', '/MAP']
+  else
+    game_module_link_args += ['/STACK:16000000,16000000']
+  endif
+elif host_system == 'darwin'
+  foreach hardening_arg : ['-Wl,-dead_strip', '-Wl,-headerpad_max_install_names']
+    if cpp.has_link_argument(hardening_arg)
+      game_module_link_args += hardening_arg
+    endif
+  endforeach
+  # Darwin peer of the Linux version script and the Windows .def files: a game
+  # module carries its own idlib and its own flavour of the game types, so
+  # exporting anything beyond the entry point makes two disagreeing definitions
+  # of the same symbol visible to the loader at once (issue #90).
+  darwin_game_module_export_list = files('tools/build/darwin_game_module.exp')
+  game_module_link_args += '-Wl,-exported_symbols_list,' + darwin_game_module_export_list[0].full_path()
+  game_module_link_depends += darwin_game_module_export_list
+elif host_system == 'linux'
+  game_module_link_args += linux_module_link_hardening_args
+  if cpp.has_link_argument('-Wl,-z,defs')
+    game_module_link_args += '-Wl,-z,defs'
+  endif
+  linux_game_module_export_map = files('tools/build/linux_game_module.map')
+  game_module_link_args += '-Wl,--version-script=' + linux_game_module_export_map[0].full_path()
+  game_module_link_depends += linux_game_module_export_map
+endif
+
+game_idlib_library = disabler()
+game_idlib_library_mp = disabler()
+if build_engine or build_games
+  # One archive per game flavour. src/idlib/precompiled.h includes
+  # mpgame/Game_local.h under -DGAME_MPAPI and game/Game_local.h otherwise, and
+  # every idlib translation unit includes precompiled.h. Linking one
+  # single-player-flavoured archive into both modules therefore put two
+  # different definitions of the same game types into each multiplayer binary,
+  # which is an ODR violation the linker resolves however it likes.
+  game_idlib_library = static_library(
+    'openq4_game_idlib',
+    game_idlib_sources,
+    include_directories: game_idlib_include_dirs,
+    cpp_args: game_common_cpp_args,
+    c_args: game_common_c_args,
+    cpp_pch: game_idlib_pch_headers,
+    override_options: game_target_override_options,
+    pic: host_system == 'linux',
+    gnu_symbol_visibility: host_system == 'windows' ? 'default' : 'hidden',
+    install: false,
+  )
+  game_idlib_library_mp = static_library(
+    'openq4_game_idlib_mp',
+    game_idlib_sources,
+    include_directories: game_idlib_mp_include_dirs,
+    cpp_args: game_common_cpp_args + ['-DGAME_MPAPI'],
+    c_args: game_common_c_args,
+    cpp_pch: game_idlib_pch_headers,
+    override_options: game_target_override_options,
+    pic: host_system == 'linux',
+    gnu_symbol_visibility: host_system == 'windows' ? 'default' : 'hidden',
+    install: false,
+  )
+endif
+
+# OpenGL renderer module (Phase B8, docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md).
+# Built from the same renderer sources the engine still links statically; the
+# engine keeps its static renderer until the module soak completes. Requires
+# the SDL3 window-services seam (gl_ContextSDL3.cpp compiles standalone via
+# OPENQ4_SDL3_CONTEXT_IMPL and drives the engine window through
+# renderWindowServices_t).
+build_renderer_gl = get_option('build_renderer_gl')
+if build_renderer_gl and (host_system == 'darwin' or platform_backend != 'sdl3')
+  build_renderer_gl = false
+endif
+
+# Vulkan module availability needs the SDL3 window-services seam on every host.
+# macOS is admitted through MoltenVK, a Vulkan-on-Metal translation layer, per
+# docs/dev/macos-moltenvk-decision.md; the module is built and shipped there but
+# stays opt-in behind r_renderApi vulkan with OpenGL as the default renderer.
+# MoltenVK is not a native Metal renderer and must never be described as one.
+build_renderer_vk = get_option('build_renderer_vk')
+if build_renderer_vk and platform_backend != 'sdl3'
+  build_renderer_vk = false
+endif
+renderer_vk_binary_name = 'renderer-vk_' + binary_arch
+
+renderer_gl_binary_name = 'renderer-gl_' + binary_arch
+if build_engine and (build_renderer_gl or build_renderer_vk)
+  # the modules' own idlib copy, compiled with engine flavor so codegen and
+  # interface layout match the renderer sources
+  renderer_idlib_library = static_library(
+    'openq4_renderer_idlib',
+    game_idlib_sources,
+    include_directories: engine_include_dirs,
+    cpp_args: engine_cpp_args,
+    c_args: engine_c_args,
+    cpp_pch: pch_headers,
+    pic: host_system == 'linux',
+    install: false,
+  )
+endif
+if build_renderer_gl and build_engine
+  renderer_gl_module_args = engine_cpp_args + [
+    '-DOPENQ4_RENDERER_MODULE',
+    '-DOPENQ4_RENDERER_GL_MODULE',
+    '-DOPENQ4_SDL3_CONTEXT_IMPL',
+  ]
+  renderer_gl_link_args = []
+  renderer_gl_link_depends = []
+  renderer_gl_deps = [glew_dep]
+  if host_system == 'windows'
+    # GLEW resolves GL procs through wglGetProcAddress on Windows
+    renderer_gl_deps += [cc.find_library('opengl32', required: true)]
+    renderer_gl_link_args += ['/FIXED:NO', '/LARGEADDRESSAWARE']
+  elif host_system == 'linux'
+    # direct GL 1.x entry points (glReadBuffer/glDrawBuffer/...) link against
+    # libGL; everything newer resolves through GLEW -> window services
+    renderer_gl_deps += [
+      cc.find_library('GL', required: true),
+      cc.find_library('dl', required: false),
+      cc.find_library('m', required: false),
+    ]
+    renderer_gl_link_args += linux_module_link_hardening_args
+    if cpp.has_link_argument('-Wl,-z,defs')
+      renderer_gl_link_args += '-Wl,-z,defs'
+    endif
+    renderer_gl_export_map = files('tools/build/linux_renderer_module.map')
+    renderer_gl_link_args += '-Wl,--version-script=' + renderer_gl_export_map[0].full_path()
+    renderer_gl_link_depends += renderer_gl_export_map
+  endif
+
+  renderer_gl_module_target = shared_module(
+    renderer_gl_binary_name,
+    openq4_renderer_gl_sources,
+    include_directories: engine_include_dirs,
+    cpp_args: renderer_gl_module_args,
+    c_args: engine_c_args,
+    cpp_pch: pch_headers,
+    link_with: [renderer_idlib_library, imagetools_library, render_geo_library],
+    dependencies: renderer_gl_deps,
+    link_args: renderer_gl_link_args,
+    link_depends: renderer_gl_link_depends,
+    gnu_symbol_visibility: host_system == 'linux' ? 'hidden' : 'default',
+    name_prefix: '',
+    install: true,
+    install_dir: install_root_dir,
+  )
+endif
+
+# Native Vulkan renderer module, full-module shape (Phase C,
+# docs/dev/plans/2026-07-17-vulkan-phase-c.md): the shared renderer front-end
+# with the GL backend replaced by the Vulkan backend. Mixed front-end TUs keep
+# their GL call sites satisfied by the hook-resolving GLEW flavor + the
+# module's GL stub TU; no GL and no SDL are linked.
+if build_renderer_vk and build_engine
+  renderer_vk_source_discovery = run_command(
+    py,
+    meson.project_source_root() / 'tools' / 'build' / 'meson_sources.py',
+    '--emit',
+    'renderer_vk',
+    check: true,
+  )
+  renderer_vk_source_paths = renderer_vk_source_discovery.stdout().strip().split('\n')
+  if renderer_vk_source_paths.length() == 0
+    error('tools/build/meson_sources.py returned no renderer_vk source files.')
+  endif
+  renderer_vk_sources = files(renderer_vk_source_paths)
+  renderer_vk_sources += files('src/external/volk/volk.c')
+
+  renderer_vk_include_dirs = [
+    engine_include_dirs,
+    include_directories(
+      'src/external/vulkan/include',
+      'src/external/volk',
+      'src/external/vma',
+    ),
+  ]
+  renderer_vk_module_args = engine_cpp_args + [
+    '-DOPENQ4_RENDERER_MODULE',
+    '-DOPENQ4_RENDERER_VK_MODULE',
+    '-DOPENQ4_RENDERER_BACKEND_NAME="vulkan"',
+    '-DOPENQ4_RENDERER_BACKEND_DESC="openQ4 native Vulkan renderer module"',
+    '-DVMA_STATIC_VULKAN_FUNCTIONS=0',
+    '-DVMA_DYNAMIC_VULKAN_FUNCTIONS=1',
+    # VK_KHR_portability_subset lives in vulkan_beta.h. Defined for every host so
+    # volk.h and the C++ translation units agree on the header set (volk exposes
+    # no beta entry points, so this adds declarations only).
+    '-DVK_ENABLE_BETA_EXTENSIONS',
+  ]
+  renderer_vk_c_args = engine_c_args + ['-DVK_ENABLE_BETA_EXTENSIONS']
+  if host_system == 'windows'
+    renderer_vk_module_args += ['-DVK_USE_PLATFORM_WIN32_KHR', '-DGLAPI=extern']
+    renderer_vk_c_args += ['-DGLAPI=extern']
+  endif
+  renderer_vk_link_args = []
+  renderer_vk_link_depends = []
+  renderer_vk_deps = [glew_dedicated_dep]
+  if host_system == 'windows'
+    renderer_vk_link_args += ['/FIXED:NO', '/LARGEADDRESSAWARE']
+  elif host_system == 'linux'
+    renderer_vk_deps += [
+      cc.find_library('dl', required: false),
+      cc.find_library('m', required: false),
+    ]
+    renderer_vk_link_args += linux_module_link_hardening_args
+    if cpp.has_link_argument('-Wl,-z,defs')
+      renderer_vk_link_args += '-Wl,-z,defs'
+    endif
+    renderer_vk_export_map = files('tools/build/linux_renderer_module.map')
+    renderer_vk_link_args += '-Wl,--version-script=' + renderer_vk_export_map[0].full_path()
+    renderer_vk_link_depends += renderer_vk_export_map
+  elif host_system == 'darwin'
+    # The macOS client keeps its statically linked OpenGL renderer, so this
+    # module ships alongside a second copy of the renderer/idlib symbols.
+    # Exporting only GetRenderAPI keeps the two from interposing, mirroring the
+    # Linux version script. -headerpad_max_install_names leaves room for the
+    # packaging step to rewrite the install name inside the app bundle.
+    renderer_vk_export_list = files('tools/build/macos_renderer_module.exp')
+    renderer_vk_link_args += [
+      '-Wl,-exported_symbols_list,' + renderer_vk_export_list[0].full_path(),
+      '-Wl,-dead_strip',
+      '-Wl,-headerpad_max_install_names',
+      '-Wl,-install_name,@loader_path/' + renderer_vk_binary_name + '.dylib',
+    ]
+    renderer_vk_link_depends += renderer_vk_export_list
+  endif
+
+  if host_system == 'darwin'
+    # shared_library, not shared_module: meson links shared_module on darwin as
+    # an MH_BUNDLE with -undefined dynamic_lookup, which drops the
+    # undefined-symbol closure the other hosts get and breaks the otool -D /
+    # install_name_tool expectations the universal2 assembler relies on.
+    # Mirrors the game modules in content/baseoq4/meson.build.
+    renderer_vk_module_target = shared_library(
+      renderer_vk_binary_name,
+      renderer_vk_sources,
+      include_directories: renderer_vk_include_dirs,
+      cpp_args: renderer_vk_module_args,
+      c_args: renderer_vk_c_args,
+      cpp_pch: pch_headers,
+      link_with: [renderer_idlib_library, imagetools_library, render_geo_library],
+      dependencies: renderer_vk_deps,
+      link_args: renderer_vk_link_args,
+      link_depends: renderer_vk_link_depends,
+      gnu_symbol_visibility: 'hidden',
+      name_prefix: '',
+      name_suffix: 'dylib',
+      install: true,
+      install_dir: install_root_dir,
+    )
+  else
+    renderer_vk_module_target = shared_module(
+      renderer_vk_binary_name,
+      renderer_vk_sources,
+      include_directories: renderer_vk_include_dirs,
+      cpp_args: renderer_vk_module_args,
+      c_args: renderer_vk_c_args,
+      cpp_pch: pch_headers,
+      link_with: [renderer_idlib_library, imagetools_library, render_geo_library],
+      dependencies: renderer_vk_deps,
+      link_args: renderer_vk_link_args,
+      link_depends: renderer_vk_link_depends,
+      gnu_symbol_visibility: host_system == 'linux' ? 'hidden' : 'default',
+      name_prefix: '',
+      install: true,
+      install_dir: install_root_dir,
+    )
+  endif
+endif
+
+if build_engine or (build_games and (build_game_sp or build_game_mp))
+  subdir('content/baseoq4')
+endif
+
+if build_games and build_game_sp
+  custom_target(
+    'openq4_stage_game_sp_direct_run',
+    input: game_sp_module_target,
+    output: 'stage-game-sp-' + binary_arch + '.stamp',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'stage_direct_run_game_module.py',
+      '--source',
+      '@INPUT@',
+      '--destination',
+      meson.current_build_dir() / 'baseoq4' / (game_sp_binary_name + game_module_filename_suffix),
+      '--stamp',
+      '@OUTPUT@',
+    ],
+    depend_files: files('tools/build/stage_direct_run_game_module.py'),
+    build_always_stale: true,
+    build_by_default: true,
+  )
+endif
+
+if build_games and build_game_mp
+  custom_target(
+    'openq4_stage_game_mp_direct_run',
+    input: game_mp_module_target,
+    output: 'stage-game-mp-' + binary_arch + '.stamp',
+    command: [
+      py,
+      meson.project_source_root() / 'tools' / 'build' / 'stage_direct_run_game_module.py',
+      '--source',
+      '@INPUT@',
+      '--destination',
+      meson.current_build_dir() / 'baseoq4' / (game_mp_binary_name + game_module_filename_suffix),
+      '--stamp',
+      '@OUTPUT@',
+    ],
+    depend_files: files('tools/build/stage_direct_run_game_module.py'),
+    build_always_stale: true,
+    build_by_default: true,
+  )
+endif
+
+if host_system == 'windows' and host_cpu_family == 'x86_64'
+  openal_runtime_dll = 'src/external/openal-soft/bin/win64/OpenAL32.dll'
+  if fs_mod.is_file(openal_runtime_dll)
+    install_data(
+      openal_runtime_dll,
+      install_dir: install_root_dir,
+    )
+  endif
+endif
+
+install_data(
+  'assets/icons/quake4.ico',
+  install_dir: install_root_dir,
+  rename: 'openQ4.ico',
+)
+
+install_data(
+  'assets/icons/quake4.icns',
+  install_dir: install_root_dir,
+  rename: 'openQ4.icns',
+)
+
+if host_system != 'windows'
+  install_data(
+    'assets/splash/quake4_rt_bitmap_4001.bmp',
+    install_dir: install_root_dir / 'assets' / 'splash',
+  )
+endif
+
+if host_system == 'darwin'
+  install_data(
+    'tools/macos/collect_macos_support_info.sh',
+    install_dir: install_root_dir,
+    install_mode: 'rwxr-xr-x',
+  )
+endif
+
+if host_system == 'linux'
+  linux_desktop_conf = configuration_data()
+  linux_desktop_conf.set('OPENQ4_CLIENT_BINARY', engine_client_binary_name)
+  linux_desktop_conf.set('OPENQ4_PROJECT_VERSION', openq4_version_short)
+  linux_desktop_conf.set('OPENQ4_PROJECT_VERSION_FULL', openq4_version_full)
+  linux_steamdeck_launcher = configure_file(
+    input: 'assets/linux/openQ4-steamdeck.in',
+    output: 'openQ4-steamdeck',
+    configuration: linux_desktop_conf,
+  )
+  linux_desktop_entry = configure_file(
+    input: 'assets/linux/openq4.desktop.in',
+    output: 'openq4.desktop',
+    configuration: linux_desktop_conf,
+  )
+  linux_steamdeck_desktop_entry = configure_file(
+    input: 'assets/linux/openq4-steamdeck.desktop.in',
+    output: 'openq4-steamdeck.desktop',
+    configuration: linux_desktop_conf,
+  )
+  install_data(
+    linux_steamdeck_launcher,
+    install_dir: install_root_dir,
+    install_mode: 'rwxr-xr-x',
+  )
+  install_data(
+    linux_desktop_entry,
+    install_dir: install_root_dir / 'share' / 'applications',
+  )
+  install_data(
+    linux_steamdeck_desktop_entry,
+    install_dir: install_root_dir / 'share' / 'applications',
+  )
+
+  if fs_mod.is_file('assets/icons/quake4.svg')
+    install_data(
+      'assets/icons/quake4.svg',
+      install_dir: install_root_dir / 'share' / 'icons' / 'hicolor' / 'scalable' / 'apps',
+      rename: 'openq4.svg',
+    )
+  endif
+
+  icon_sizes = ['16', '20', '24', '32', '40', '48', '64', '128', '256', '512', '1024']
+  foreach icon_size : icon_sizes
+    icon_png = 'assets/icons/quake4_' + icon_size + '.png'
+    if fs_mod.is_file(icon_png)
+      install_data(
+        icon_png,
+        install_dir: install_root_dir / 'share' / 'icons' / 'hicolor' / (icon_size + 'x' + icon_size) / 'apps',
+        rename: 'openq4.png',
+      )
+    endif
+  endforeach
+endif
+
+version_iteration_summary = version_iteration
+if version_iteration_summary == ''
+  version_iteration_summary = 'none'
+endif
+
+openq4_git_sha_summary = openq4_git_sha
+if openq4_git_sha_summary == ''
+  openq4_git_sha_summary = 'unavailable'
+endif
+
+summary(
+  {
+    'Host system': host_system,
+    'Host cpu family': host_cpu_family,
+    'Version track': version_track,
+    'Version iteration': version_iteration_summary,
+    'Version base': openq4_version_base,
+    'Version short': openq4_version_short,
+    'Version full': openq4_version_full,
+    'Version tag': openq4_version_tag,
+    'Version resource': openq4_version_resource_dotted,
+    'Git short SHA': openq4_git_sha_summary,
+    'Git dirty': openq4_git_dirty,
+    'Git commit count': openq4_commit_count,
+    'MSVC toolchain': is_msvc,
+    'MSVC version': cpp.version(),
+    'MSVC 2026 baseline enforced': get_option('enforce_msvc_2026'),
+    'C++ standard': get_option('cpp_std'),
+    'Platform backend requested': platform_backend_requested,
+    'Platform backend': platform_backend,
+    'macOS graphics bridge': macos_graphics_bridge,
+    'macOS OpenAL provider': macos_openal_provider,
+    'OpenAL override root': openal_root_override == '' ? 'bundled/default' : openal_root_override,
+    'Build engine': build_engine,
+    'engine client binary': engine_client_binary_name,
+    'engine dedicated binary': engine_ded_binary_name,
+    'Integrated BSE in client': build_engine,
+    'Integrated BSE source dir': bse_source_root,
+    'Build games': build_games,
+    'GameLibs source repo': game_libs_repo_summary,
+    'Build game_sp': build_games and build_game_sp,
+    'Build game_mp': build_games and build_game_mp,
+    'game_sp binary': game_sp_binary_name,
+    'game_mp binary': game_mp_binary_name,
+    'Build Vulkan renderer module': build_renderer_vk and build_engine,
+    'Vulkan renderer binary': renderer_vk_binary_name,
+    'Resource compiler': resource_compiler.found(),
+    'SDL3': use_sdl3_backend and sdl3_dep.found(),
+    'Linux X11 helpers': linux_x11_helpers_enabled,
+    'Linux executable PIE': linux_executable_pie,
+    'GLEW': glew_dep.found(),
+    'OpenAL': openal_dep.found(),
+    'stb_vorbis': stb_vorbis_dep.found(),
+    'Precompiled headers': get_option('use_pch'),
+    'Dedicated server target': build_engine,
+    'Linux dedicated headless link split': build_engine and host_system == 'linux',
+    'Install root': install_root_dir,
+  },
+  section: 'Build Features',
+  bool_yn: true,
+)

@@ -1,0 +1,935 @@
+/*
+===========================================================================
+
+Doom 3 GPL Source Code
+Copyright (C) 1999-2011 id Software LLC, a ZeniMax Media company. 
+
+This file is part of the Doom 3 GPL Source Code (?Doom 3 Source Code?).  
+
+Doom 3 Source Code is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Doom 3 Source Code is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the Doom 3 Source Code is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+
+
+
+#include "tr_local.h"
+#include "GLDebugScope.h"
+#include "GLStateCache.h"
+#include "RenderGraph.h"
+#include "RenderGraphResources.h"
+#include "MaterialResourceTable.h"
+#include "ModernGLExecutor.h"
+#include "ModernClusteredLighting.h"
+#include "RendererMetrics.h"
+
+
+frameData_t		*frameData;
+backEndState_t	backEnd;
+
+// true while the dormant-pipeline metric mirrors hold freshly zeroed values;
+// re-armed whenever the modern side pipeline records real stats
+static bool rg_modernStatMirrorsZeroed = false;
+
+// ~1 MB of packet/record arrays: static storage (like rg_frontEndScenePacketFrame)
+// keeps it out of the backend stack frame and its per-call __chkstk probe.
+// R_ScenePackets_BuildLegacyCommandStream Clear()s it before each use; only valid
+// while a single backend executes at a time.
+static idScenePacketFrame rg_backendScenePacketFrame;
+
+static ID_INLINE GLint R_SafeStencilClearValue() {
+	const int stencilBits = idMath::ClampInt( 1, 30, ( glConfig.stencilBits > 0 ) ? glConfig.stencilBits : 8 );
+	return 1 << ( stencilBits - 1 );
+}
+
+
+/*
+======================
+RB_SetDefaultGLState
+
+This should initialize all GL state that any part of the entire program
+may touch, including the editor.
+======================
+*/
+void RB_SetDefaultGLState( void ) {
+	int		i;
+	const int maxStateUnits = Max( 0, Min( MAX_MULTITEXTURE_UNITS, Min( glConfig.maxTextureUnits, glConfig.maxTextureImageUnits ) ) );
+
+	RB_LogComment( "--- R_SetDefaultGLState ---\n" );
+
+	glClearDepth( 1.0f );
+	glColor4f (1,1,1,1);
+
+	// the vertex array is always enabled
+	glEnableClientState( GL_VERTEX_ARRAY );
+	glEnableClientState( GL_TEXTURE_COORD_ARRAY );
+	glDisableClientState( GL_COLOR_ARRAY );
+
+	//
+	// make sure our GL state vector is set correctly
+	//
+	memset( &backEnd.glState, 0, sizeof( backEnd.glState ) );
+	backEnd.glState.forceGlState = true;
+	idVertexCache::InvalidateBufferBindings();
+
+	glColorMask( 1, 1, 1, 1 );
+
+	glEnable( GL_DEPTH_TEST );
+	glEnable( GL_BLEND );
+	glEnable( GL_SCISSOR_TEST );
+	glEnable( GL_CULL_FACE );
+	glDisable( GL_SAMPLE_ALPHA_TO_COVERAGE );
+	glDisable( GL_LIGHTING );
+	glDisable( GL_LINE_STIPPLE );
+	glDisable( GL_STENCIL_TEST );
+
+	glPolygonMode (GL_FRONT_AND_BACK, GL_FILL);
+	glDepthMask( GL_TRUE );
+	glDepthFunc( GL_ALWAYS );
+ 
+	glCullFace( GL_FRONT_AND_BACK );
+	glShadeModel( GL_SMOOTH );
+
+	if ( r_useScissor.GetBool() ) {
+		glScissor( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+	}
+
+	for ( i = maxStateUnits - 1 ; i >= 0 ; i-- ) {
+		GL_SelectTexture( i );
+
+		// object linear texgen is our default
+		glTexGenf( GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+		glTexGenf( GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+		glTexGenf( GL_R, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+		glTexGenf( GL_Q, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+
+		GL_TexEnv( GL_MODULATE );
+		glDisable( GL_TEXTURE_2D );
+		if ( glConfig.texture3DAvailable ) {
+			glDisable( GL_TEXTURE_3D );
+		}
+		if ( glConfig.cubeMapAvailable ) {
+			glDisable( GL_TEXTURE_CUBE_MAP_EXT );
+		}
+	}
+}
+
+
+/*
+====================
+RB_LogComment
+====================
+*/
+void RB_LogComment( const char *comment, ... ) {
+   va_list marker;
+
+	if ( !tr.logFile ) {
+		return;
+	}
+
+	fprintf( tr.logFile, "// " );
+	va_start( marker, comment );
+	vfprintf( tr.logFile, comment, marker );
+	va_end( marker );
+}
+
+
+//=============================================================================
+
+
+
+/*
+====================
+GL_SelectTexture
+====================
+*/
+void GL_SelectTexture( int unit ) {
+	if ( backEnd.glState.currenttmu == unit ) {
+		return;
+	}
+
+	if ( unit < 0 || unit >= MAX_MULTITEXTURE_UNITS || unit >= glConfig.maxTextureUnits || unit >= glConfig.maxTextureImageUnits ) {
+		common->Warning(
+			"GL_SelectTexture: unit = %i (max tracked = %i, max texture units = %i, max image units = %i)",
+			unit,
+			MAX_MULTITEXTURE_UNITS,
+			glConfig.maxTextureUnits,
+			glConfig.maxTextureImageUnits
+		);
+		return;
+	}
+
+	glActiveTextureARB( GL_TEXTURE0_ARB + unit );
+	glClientActiveTextureARB( GL_TEXTURE0_ARB + unit );
+	RB_LogComment( "glActiveTextureARB( %i );\nglClientActiveTextureARB( %i );\n", unit, unit );
+
+	backEnd.glState.currenttmu = unit;
+}
+
+
+/*
+====================
+GL_Cull
+
+This handles the flipping needed when the view being
+rendered is a mirored view.
+====================
+*/
+void GL_Cull( int cullType ) {
+	if ( backEnd.glState.faceCulling == cullType ) {
+		return;
+	}
+
+	if ( cullType == CT_TWO_SIDED ) {
+		glDisable( GL_CULL_FACE );
+	} else  {
+		if ( backEnd.glState.faceCulling == CT_TWO_SIDED ) {
+			glEnable( GL_CULL_FACE );
+		}
+
+		if ( cullType == CT_BACK_SIDED ) {
+			if ( backEnd.viewDef->isMirror ) {
+				glCullFace( GL_FRONT );
+			} else {
+				glCullFace( GL_BACK );
+			}
+		} else {
+			if ( backEnd.viewDef->isMirror ) {
+				glCullFace( GL_BACK );
+			} else {
+				glCullFace( GL_FRONT );
+			}
+		}
+	}
+
+	backEnd.glState.faceCulling = cullType;
+}
+
+/*
+====================
+GL_TexEnv
+====================
+*/
+void GL_TexEnv( int env ) {
+	tmu_t	*tmu;
+
+	tmu = &backEnd.glState.tmu[backEnd.glState.currenttmu];
+	if ( env == tmu->texEnv ) {
+		return;
+	}
+
+	tmu->texEnv = env;
+
+	switch ( env ) {
+	case GL_COMBINE_EXT:
+	case GL_MODULATE:
+	case GL_REPLACE:
+	case GL_DECAL:
+	case GL_ADD:
+		glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, env );
+		break;
+	default:
+		common->Error( "GL_TexEnv: invalid env '%d' passed\n", env );
+		break;
+	}
+}
+
+/*
+=================
+GL_ClearStateDelta
+
+Clears the state delta bits, so the next GL_State
+will set every item
+=================
+*/
+void GL_ClearStateDelta( void ) {
+	backEnd.glState.forceGlState = true;
+}
+
+/*
+====================
+GL_State
+
+This routine is responsible for setting the most commonly changed state
+====================
+*/
+void GL_State( int stateBits ) {
+	int	diff;
+	
+	if ( !r_useStateCaching.GetBool() || backEnd.glState.forceGlState ) {
+		// make sure everything is set all the time, so we
+		// can see if our delta checking is screwing up
+		diff = -1;
+		backEnd.glState.forceGlState = false;
+	} else {
+		diff = stateBits ^ backEnd.glState.glStateBits;
+		if ( !diff ) {
+			return;
+		}
+	}
+
+	//
+	// check depthFunc bits
+	//
+	if ( diff & ( GLS_DEPTHFUNC_EQUAL | GLS_DEPTHFUNC_LESS | GLS_DEPTHFUNC_ALWAYS ) ) {
+		if ( stateBits & GLS_DEPTHFUNC_EQUAL ) {
+			glDepthFunc( GL_EQUAL );
+		} else if ( stateBits & GLS_DEPTHFUNC_ALWAYS ) {
+			glDepthFunc( GL_ALWAYS );
+		} else {
+			glDepthFunc( GL_LEQUAL );
+		}
+	}
+
+
+	//
+	// check blend bits
+	//
+	if ( diff & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) {
+		GLenum srcFactor, dstFactor;
+
+		switch ( stateBits & GLS_SRCBLEND_BITS ) {
+		case GLS_SRCBLEND_ZERO:
+			srcFactor = GL_ZERO;
+			break;
+		case GLS_SRCBLEND_ONE:
+			srcFactor = GL_ONE;
+			break;
+		case GLS_SRCBLEND_DST_COLOR:
+			srcFactor = GL_DST_COLOR;
+			break;
+		case GLS_SRCBLEND_ONE_MINUS_DST_COLOR:
+			srcFactor = GL_ONE_MINUS_DST_COLOR;
+			break;
+		case GLS_SRCBLEND_SRC_COLOR:
+			srcFactor = GL_SRC_COLOR;
+			break;
+		case GLS_SRCBLEND_ONE_MINUS_SRC_COLOR:
+			srcFactor = GL_ONE_MINUS_SRC_COLOR;
+			break;
+		case GLS_SRCBLEND_SRC_ALPHA:
+			srcFactor = GL_SRC_ALPHA;
+			break;
+		case GLS_SRCBLEND_ONE_MINUS_SRC_ALPHA:
+			srcFactor = GL_ONE_MINUS_SRC_ALPHA;
+			break;
+		case GLS_SRCBLEND_DST_ALPHA:
+			srcFactor = GL_DST_ALPHA;
+			break;
+		case GLS_SRCBLEND_ONE_MINUS_DST_ALPHA:
+			srcFactor = GL_ONE_MINUS_DST_ALPHA;
+			break;
+		case GLS_SRCBLEND_ALPHA_SATURATE:
+			srcFactor = GL_SRC_ALPHA_SATURATE;
+			break;
+		default:
+			srcFactor = GL_ONE;		// to get warning to shut up
+			common->Error( "GL_State: invalid src blend state bits\n" );
+			break;
+		}
+
+		switch ( stateBits & GLS_DSTBLEND_BITS ) {
+		case GLS_DSTBLEND_ZERO:
+			dstFactor = GL_ZERO;
+			break;
+		case GLS_DSTBLEND_ONE:
+			dstFactor = GL_ONE;
+			break;
+		case GLS_DSTBLEND_SRC_COLOR:
+			dstFactor = GL_SRC_COLOR;
+			break;
+		case GLS_DSTBLEND_ONE_MINUS_SRC_COLOR:
+			dstFactor = GL_ONE_MINUS_SRC_COLOR;
+			break;
+		case GLS_DSTBLEND_SRC_ALPHA:
+			dstFactor = GL_SRC_ALPHA;
+			break;
+		case GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA:
+			dstFactor = GL_ONE_MINUS_SRC_ALPHA;
+			break;
+		case GLS_DSTBLEND_DST_ALPHA:
+			dstFactor = GL_DST_ALPHA;
+			break;
+		case GLS_DSTBLEND_ONE_MINUS_DST_ALPHA:
+			dstFactor = GL_ONE_MINUS_DST_ALPHA;
+			break;
+		default:
+			dstFactor = GL_ONE;		// to get warning to shut up
+			common->Error( "GL_State: invalid dst blend state bits\n" );
+			break;
+		}
+
+		glBlendFunc( srcFactor, dstFactor );
+	}
+
+	//
+	// check depthmask
+	//
+	if ( diff & GLS_DEPTHMASK ) {
+		if ( stateBits & GLS_DEPTHMASK ) {
+			glDepthMask( GL_FALSE );
+		} else {
+			glDepthMask( GL_TRUE );
+		}
+	}
+
+	//
+	// check colormask
+	//
+	if ( diff & (GLS_REDMASK|GLS_GREENMASK|GLS_BLUEMASK|GLS_ALPHAMASK) ) {
+		GLboolean		r, g, b, a;
+		r = ( stateBits & GLS_REDMASK ) ? 0 : 1;
+		g = ( stateBits & GLS_GREENMASK ) ? 0 : 1;
+		b = ( stateBits & GLS_BLUEMASK ) ? 0 : 1;
+		a = ( stateBits & GLS_ALPHAMASK ) ? 0 : 1;
+		glColorMask( r, g, b, a );
+	}
+
+	//
+	// fill/line mode
+	//
+	if ( diff & GLS_POLYMODE_LINE ) {
+		if ( stateBits & GLS_POLYMODE_LINE ) {
+			glPolygonMode( GL_FRONT_AND_BACK, GL_LINE );
+		} else {
+			glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
+		}
+	}
+
+	//
+	// alpha test
+	//
+	if ( diff & GLS_ATEST_BITS ) {
+		switch ( stateBits & GLS_ATEST_BITS ) {
+		case 0:
+			glDisable( GL_ALPHA_TEST );
+			break;
+		case GLS_ATEST_EQ_255:
+			glEnable( GL_ALPHA_TEST );
+			glAlphaFunc( GL_EQUAL, 1 );
+			break;
+		case GLS_ATEST_LT_128:
+			glEnable( GL_ALPHA_TEST );
+			glAlphaFunc( GL_LESS, 0.5 );
+			break;
+		case GLS_ATEST_GE_128:
+			glEnable( GL_ALPHA_TEST );
+			glAlphaFunc( GL_GEQUAL, 0.5 );
+			break;
+		default:
+			assert( 0 );
+			break;
+		}
+	}
+
+	backEnd.glState.glStateBits = stateBits;
+}
+
+
+
+
+/*
+============================================================================
+
+RENDER BACK END THREAD FUNCTIONS
+
+============================================================================
+*/
+
+/*
+=============
+RB_SetGL2D
+
+This is not used by the normal game paths, just by some tools
+=============
+*/
+void RB_SetGL2D( void ) {
+	// set 2D virtual screen size
+	glViewport( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+	if ( r_useScissor.GetBool() ) {
+		glScissor( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+	}
+	glMatrixMode( GL_PROJECTION );
+    glLoadIdentity();
+	glOrtho( 0, 640, 480, 0, 0, 1 );		// always assume 640x480 virtual coordinates
+	glMatrixMode( GL_MODELVIEW );
+    glLoadIdentity();
+
+	GL_State( GLS_DEPTHFUNC_ALWAYS |
+			  GLS_SRCBLEND_SRC_ALPHA |
+			  GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
+
+	GL_Cull( CT_TWO_SIDED );
+
+	glDisable( GL_DEPTH_TEST );
+	glDisable( GL_STENCIL_TEST );
+}
+
+
+
+/*
+=============
+RB_SetBuffer
+
+=============
+*/
+static void	RB_SetBuffer( const void *data ) {
+	const setBufferCommand_t	*cmd;
+
+	// see which draw buffer we want to render the frame to
+
+	cmd = (const setBufferCommand_t *)data;
+
+	backEnd.frameCount = cmd->frameCount;
+
+	glDrawBuffer( cmd->buffer );
+
+	// clear screen for debugging
+	// automatically enable this with several other debug tools
+	// that might leave unrendered portions of the screen
+	if ( r_clear.GetFloat() || idStr::Length( r_clear.GetString() ) != 1 || r_lockSurfaces.GetBool() || r_singleArea.GetBool() || r_showOverDraw.GetBool() ) {
+		float c[3];
+		if ( sscanf( r_clear.GetString(), "%f %f %f", &c[0], &c[1], &c[2] ) == 3 ) {
+			glClearColor( c[0], c[1], c[2], 1 );
+		} else if ( r_clear.GetInteger() == 2 ) {
+			glClearColor( 0.0f, 0.0f,  0.0f, 1.0f );
+		} else if ( r_showOverDraw.GetBool() ) {
+			glClearColor( 1.0f, 1.0f, 1.0f, 1.0f );
+		} else {
+			glClearColor( 0.4f, 0.0f, 0.25f, 1.0f );
+		}
+		glClear( GL_COLOR_BUFFER_BIT );
+	}
+}
+
+/*
+===============
+RB_ShowImages
+
+Draw all the images to the screen, on top of whatever
+was there.  This is used to test for texture thrashing.
+===============
+*/
+void RB_ShowImages( void ) {
+	
+}
+
+
+/*
+=============
+RB_SwapBuffers
+
+=============
+*/
+const void	RB_SwapBuffers( const void *data ) {
+	// texture swapping test
+	if ( r_showImages.GetInteger() != 0 ) {
+		RB_ShowImages();
+	}
+
+	// force a gl sync if requested
+	if ( r_finish.GetBool() ) {
+		glFinish();
+	}
+
+	RB_LogComment( "***************** RB_SwapBuffers *****************\n\n\n" );
+
+	if ( !r_frontBuffer.GetBool() ) {
+		RB_ApplyResolutionScaleToBackBuffer();
+		RB_ApplyCRTToBackBuffer();
+		RB_ApplyColorMappingsToBackBuffer();
+	}
+
+	// Screenshot readback consumes the fully post-processed back buffer below.
+	// Keep that buffer owned by OpenGL until R_ReadTiledPixels has copied it;
+	// presenting an EGL window surface may discard its contents immediately.
+	// All ordinary frames retain the existing presentation path.
+	if ( !r_frontBuffer.GetBool() && !tr.takingScreenshot ) {
+	    GLimp_SwapBuffers();
+	}
+}
+
+/*
+=============
+RB_CopyRender
+
+Copy part of the current framebuffer to an image
+=============
+*/
+const void	RB_CopyRender( const void *data ) {
+	const copyRenderCommand_t	*cmd;
+
+	cmd = (const copyRenderCommand_t *)data;
+
+	if ( r_skipCopyTexture.GetBool() ) {
+		return;
+	}
+
+    RB_LogComment( "***************** RB_CopyRender *****************\n" );
+
+	if (cmd->image) {
+		if ( cmd->copyDepth ) {
+			cmd->image->CopyDepthbuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight );
+		} else {
+			cmd->image->CopyFramebuffer( cmd->x, cmd->y, cmd->imageWidth, cmd->imageHeight );
+		}
+	}
+}
+
+// jmarshall
+/*
+=============
+RB_SetRenderTexture
+=============
+*/
+static void RB_SetRenderTexture(const void* data) {
+	const setRenderTargetCommand_t* cmd;
+
+	cmd = (setRenderTargetCommand_t*)data;
+
+	if ( cmd->renderTexture != NULL && cmd->renderTexture->MakeCurrent() ) {
+		backEnd.renderTexture = cmd->renderTexture;
+		backEnd.feedbackRenderTexture = cmd->feedbackRenderTexture;
+	}
+	else {
+		backEnd.renderTexture = nullptr;
+		backEnd.feedbackRenderTexture = nullptr;
+		idRenderTexture::BindNull();
+	}
+}
+
+static void RB_RestoreTrackedRenderTexture( void ) {
+	if ( backEnd.renderTexture != NULL && backEnd.renderTexture->MakeCurrent() ) {
+		return;
+	}
+	backEnd.renderTexture = NULL;
+	backEnd.feedbackRenderTexture = NULL;
+	idRenderTexture::BindNull();
+}
+
+/*
+============
+RB_ResolveMSAA
+============
+*/
+static void RB_ResolveMSAA(const void* data) {
+	const resolveRenderTargetCommand_t* cmd;
+
+	cmd = (resolveRenderTargetCommand_t*)data;
+
+	if ( cmd->msaaRenderTexture == NULL || cmd->destRenderTexture == NULL ||
+		!cmd->msaaRenderTexture->EnsureDeviceHandle() ||
+		!cmd->destRenderTexture->EnsureDeviceHandle() ) {
+		RB_RestoreTrackedRenderTexture();
+		return;
+	}
+
+	const GLuint sourceHandle = cmd->msaaRenderTexture->GetDeviceHandle();
+	const GLuint destinationHandle = cmd->destRenderTexture->GetDeviceHandle();
+	if ( sourceHandle == 0 || destinationHandle == 0 ) {
+		RB_RestoreTrackedRenderTexture();
+		return;
+	}
+
+	int width = cmd->msaaRenderTexture->GetWidth();
+	int height = cmd->msaaRenderTexture->GetHeight();
+	if ( width <= 0 || height <= 0 ) {
+		RB_RestoreTrackedRenderTexture();
+		return;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceHandle);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, destinationHandle);
+
+	// Resolve all of the render targets.
+	const int colorImageCount = cmd->msaaRenderTexture->GetNumColorImages();
+	for (int i = 0; i < colorImageCount; i++)
+	{
+		glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
+		glDrawBuffer(GL_COLOR_ATTACHMENT0 + i);
+		glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	}
+
+	GL_CheckErrors();
+
+	// Resolve the depth buffer only when explicitly requested.
+	if ( cmd->resolveDepth ) {
+		glReadBuffer( GL_NONE );
+		glDrawBuffer( GL_NONE );
+		glBlitFramebuffer( 0, 0, width, height, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST );
+
+		GL_CheckErrors();
+	}
+
+	glReadBuffer(GL_COLOR_ATTACHMENT0);
+	glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+	// restore the tracked render target so backEnd.renderTexture stays in
+	// sync with the bound framebuffer
+	RB_RestoreTrackedRenderTexture();
+}
+
+/*
+============
+RB_ClearRenderTarget
+============
+*/
+static void RB_ClearRenderTarget(const void* data) {
+	const renderClearBufferCommand_t* cmd;
+
+	cmd = (renderClearBufferCommand_t*)data;
+
+	if ( cmd->clearColor ) {
+		glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+	}
+	if ( cmd->clearDepth ) {
+		glDepthMask( GL_TRUE );
+	}
+
+	if (cmd->clearDepth) {
+		glStencilMask(0xff);
+		// some cards may have 7 bit stencil buffers, so don't assume this
+		// should be 128
+		glClearStencil( R_SafeStencilClearValue() );
+		glClearDepth(cmd->clearDepthValue);
+		glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	}
+
+	if (cmd->clearColor) {
+		glClearColor(cmd->clearColorValue[0], cmd->clearColorValue[1], cmd->clearColorValue[2], cmd->clearColorValue[3]);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	glClearDepth(1.0f);
+	GL_ClearStateDelta();
+
+}
+// jmarshall end
+
+/*
+====================
+RB_ExecuteBackEndCommands
+
+This function will be called syncronously if running without
+smp extensions, or asyncronously by another thread.
+====================
+*/
+int		backEndStartTime, backEndFinishTime;
+void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
+	// r_debugRenderToTexture
+	int	c_draw3d = 0, c_draw2d = 0, c_setBuffers = 0, c_swapBuffers = 0, c_copyRenders = 0, c_specialEffects = 0, c_renderTargetOps = 0;
+
+	R_GLDebugOutput_FlushMessages();
+	if ( cmds->commandId == RC_NOP && !cmds->next ) {
+		return;
+	}
+
+	R_GLStateCache_BeginFrame();
+	// The legacy backend issues raw GL between the last modern pass of the previous
+	// frame and this frame's modern submits; cached state from last frame is stale.
+	R_GLStateCache_InvalidateAll( "backend frame begin" );
+
+	if ( R_ScenePackets_SidePipelineRequired() ) {
+		const int packetBuildStart = Sys_Milliseconds();
+		const idScenePacketFrame *scenePackets = NULL;
+		if ( R_ScenePackets_FrontEndFrameAvailable() ) {
+			scenePackets = &R_ScenePackets_FrontEndFrame();
+		} else {
+			R_ScenePackets_BuildLegacyCommandStream( cmds, rg_backendScenePacketFrame );
+			scenePackets = &rg_backendScenePacketFrame;
+		}
+		R_RendererMetrics_AddPacketBuildMsec( Sys_Milliseconds() - packetBuildStart );
+		R_ScenePackets_LogIfVerbose( *scenePackets );
+
+		const int graphBuildStart = Sys_Milliseconds();
+		idRenderGraph legacyGraph;
+		R_RenderGraph_BuildFromScenePackets( *scenePackets, legacyGraph );
+		R_RendererMetrics_AddGraphBuildMsec( Sys_Milliseconds() - graphBuildStart );
+		R_RenderGraph_LogIfVerbose( legacyGraph );
+		{
+			const scenePacketFrameStats_t &packetStats = scenePackets->Stats();
+			R_RendererMetrics_RecordScenePackets( packetStats );
+			const renderGraphStats_t &graphStats = legacyGraph.Stats();
+			R_RendererMetrics_RecordRenderGraph(
+				graphStats.graphPasses,
+				graphStats.passPackets,
+				graphStats.scenePackets,
+				graphStats.drawPackets,
+				graphStats.commandPackets,
+				graphStats.resources,
+				graphStats.importedResources,
+				graphStats.transientResources,
+				graphStats.aliasableTransientResources,
+				graphStats.resourceAccesses,
+				graphStats.readAccesses,
+				graphStats.writeAccesses,
+				graphStats.clearOps,
+				graphStats.resolveOps,
+				graphStats.invalidateOps,
+				graphStats.presentOps,
+				graphStats.overflow );
+		}
+		R_RenderGraphResources_PrepareFrame( legacyGraph );
+		R_RendererMetrics_RecordRenderGraphResources( R_RenderGraphResources_Stats() );
+		R_MaterialResourceTable_PrepareFrame( *scenePackets );
+		R_RendererMetrics_RecordMaterialResourceTable( R_MaterialResourceTable_Stats() );
+		R_ModernGLExecutor_PrepareFrame( *scenePackets, legacyGraph );
+		rg_modernStatMirrorsZeroed = false;	// active frame wrote real stats; re-zero on next dormant frame
+	} else {
+		// the zeroed stat mirrors cannot change while the side pipeline is
+		// skipped: refresh them once on the active->dormant transition, and
+		// per-frame only while metrics output actually consumes them
+		if ( !rg_modernStatMirrorsZeroed || r_rendererMetrics.GetInteger() > 0 ) {
+			scenePacketFrameStats_t packetStats;
+			memset( &packetStats, 0, sizeof( packetStats ) );
+			R_RendererMetrics_RecordScenePackets( packetStats );
+			R_RendererMetrics_RecordRenderGraph( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false );
+			renderGraphResourceManagerStats_t graphResourceStats;
+			memset( &graphResourceStats, 0, sizeof( graphResourceStats ) );
+			R_RendererMetrics_RecordRenderGraphResources( graphResourceStats );
+			materialResourceTableStats_t materialStats;
+			memset( &materialStats, 0, sizeof( materialStats ) );
+			R_RendererMetrics_RecordMaterialResourceTable( materialStats );
+			rendererClusteredLightingStats_t clusterStats;
+			memset( &clusterStats, 0, sizeof( clusterStats ) );
+			R_RendererMetrics_RecordClusteredLighting( clusterStats );
+			rg_modernStatMirrorsZeroed = true;
+		}
+		R_ModernGLExecutor_SkipFrame();
+	}
+	backEndStartTime = Sys_Milliseconds();
+	R_RendererMetrics_BeginGpuBackendFrame();
+	R_GLStateCache_LegacyHandoffReset( "legacy ARB2 backend" );
+
+	// needed for editor rendering
+	RB_SetDefaultGLState();
+	backEnd.renderTexture = NULL;
+	backEnd.postProcessTexelSize = tr.postProcessTexelSize;
+	backEnd.postProcessSourceColorSpace = tr.postProcessSourceColorSpace;
+	backEnd.postProcessSMAAQuality = tr.postProcessSMAAQuality;
+	idRenderTexture::BindNull();
+
+	// upload any image loads that have completed
+	//globalImages->CompleteBackgroundImageLoads();
+
+	for ( ; cmds ; cmds = (const emptyCommand_t *)cmds->next ) {
+		switch ( cmds->commandId ) {
+		case RC_NOP:
+			break;
+		case RC_DRAW_VIEW:
+			R_RendererMetrics_BeginGpuTimer( ((const drawSurfsCommand_t *)cmds)->viewDef->viewEntitys ? RENDERER_GPU_TIMER_DRAW3D : RENDERER_GPU_TIMER_DRAW2D );
+			if ( !((const drawSurfsCommand_t *)cmds)->viewDef->viewEntitys && R_ModernGLExecutor_LegacyPassCanSkip( RENDER_PASS_GUI ) ) {
+				R_ModernGLExecutor_RecordLegacyPassSkipped( RENDER_PASS_GUI );
+			} else {
+				RB_DrawView( cmds );
+			}
+			R_RendererMetrics_EndGpuTimer();
+			if ( ((const drawSurfsCommand_t *)cmds)->viewDef->viewEntitys ) {
+				c_draw3d++;
+			}
+			else {
+				c_draw2d++;
+			}
+			break;
+		case RC_DRAW_SPECIAL_EFFECTS:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_SPECIAL_EFFECTS );
+			if ( R_ModernGLExecutor_LegacyPassCanSkip( RENDER_PASS_SPECIAL_EFFECTS ) ) {
+				R_ModernGLExecutor_RecordLegacyPassSkipped( RENDER_PASS_SPECIAL_EFFECTS );
+			} else {
+				RB_DrawSpecialEffects( cmds );
+			}
+			R_RendererMetrics_EndGpuTimer();
+			c_specialEffects++;
+			break;
+// jmarshall
+		case RC_SET_RENDERTEXTURE:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_RENDER_TARGET );
+			RB_SetRenderTexture(cmds);
+			R_RendererMetrics_EndGpuTimer();
+			c_renderTargetOps++;
+			break;
+		case RC_RESOLVE_MSAA:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_RENDER_TARGET );
+			RB_ResolveMSAA(cmds);
+			R_RendererMetrics_EndGpuTimer();
+			c_renderTargetOps++;
+			break;
+		case RC_CLEAR_RENDERTARGET:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_RENDER_TARGET );
+			RB_ClearRenderTarget(cmds);
+			R_RendererMetrics_EndGpuTimer();
+			c_renderTargetOps++;
+			break;
+		case RC_SET_POSTPROCESS_SOURCE_SIZE:
+			backEnd.postProcessTexelSize = ((const setPostProcessSourceSizeCommand_t *)cmds)->texelSize;
+			break;
+		case RC_SET_POSTPROCESS_SOURCE_COLOR_SPACE:
+			backEnd.postProcessSourceColorSpace = ((const setPostProcessSourceColorSpaceCommand_t *)cmds)->colorSpace;
+			break;
+		case RC_SET_POSTPROCESS_SMAA_QUALITY:
+			backEnd.postProcessSMAAQuality = ((const setPostProcessSMAAQualityCommand_t *)cmds)->quality;
+			break;
+// jmarshall end
+		case RC_SET_BUFFER:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_SET_BUFFER );
+			RB_SetBuffer( cmds );
+			R_RendererMetrics_EndGpuTimer();
+			c_setBuffers++;
+			break;
+		case RC_SWAP_BUFFERS: {
+			R_ModernGLExecutor_ComposeVisibleFrame();
+			R_ModernGLExecutor_DrawDepthDebugOverlay();
+			R_ModernGLExecutor_DrawGBufferDebugOverlay();
+			R_ModernGLExecutor_DrawDeferredDebugOverlay();
+			R_ModernClusteredLighting_DrawDebugOverlay();
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_SWAP_BUFFERS );
+			const int presentStart = Sys_Milliseconds();
+			RB_SwapBuffers( cmds );
+			R_RendererMetrics_AddPresentMsec( Sys_Milliseconds() - presentStart );
+			R_RendererMetrics_EndGpuTimer();
+			c_swapBuffers++;
+			break;
+		}
+		case RC_COPY_RENDER:
+			R_RendererMetrics_BeginGpuTimer( RENDERER_GPU_TIMER_COPY_RENDER );
+			RB_CopyRender( cmds );
+			R_RendererMetrics_EndGpuTimer();
+			c_copyRenders++;
+			break;
+		default:
+			common->Error( "RB_ExecuteBackEndCommands: bad commandId" );
+			break;
+		}
+	}
+
+	// go back to the default texture so the editor doesn't mess up a bound image
+	GL_SelectTexture( 0 );
+	R_BindTextureForDirectAccess( GL_TEXTURE_2D, 0 );
+
+	// stop rendering on this thread
+	R_RendererMetrics_EndGpuBackendFrame();
+	backEndFinishTime = Sys_Milliseconds();
+	backEnd.pc.msec = backEndFinishTime - backEndStartTime;
+	R_RendererMetrics_RecordGLStateCache( R_GLStateCache_Stats() );
+	R_RendererMetrics_RecordBackendCommands( c_draw3d, c_draw2d, c_setBuffers, c_swapBuffers, c_copyRenders, c_specialEffects, c_renderTargetOps );
+
+	if ( r_debugRenderToTexture.GetInteger() == 1 ) {
+		common->Printf( "3d: %i, 2d: %i, SetBuf: %i, SwpBuf: %i, CpyRenders: %i, CpyFrameBuf: %i\n", c_draw3d, c_draw2d, c_setBuffers, c_swapBuffers, c_copyRenders, backEnd.c_copyFrameBuffer );
+		backEnd.c_copyFrameBuffer = 0;
+	}
+}

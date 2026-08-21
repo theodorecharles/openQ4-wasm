@@ -1,0 +1,386 @@
+/*
+===========================================================================
+
+Doom 3 GPL Source Code
+Copyright (C) 1999-2011 id Software LLC, a ZeniMax Media company.
+
+This file is part of the Doom 3 GPL Source Code (?Doom 3 Source Code?).
+
+Doom 3 Source Code is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Doom 3 Source Code is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the Doom 3 Source Code is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+
+#ifndef __COMMON_H__
+#define __COMMON_H__
+
+#include "UsercmdGen.h"
+
+/*
+==============================================================
+
+  Common
+
+==============================================================
+*/
+
+typedef enum {
+	EDITOR_NONE					= 0,
+	EDITOR_RADIANT				= BIT(1),
+	EDITOR_GUI					= BIT(2),
+	EDITOR_DEBUGGER				= BIT(3),
+	EDITOR_SCRIPT				= BIT(4),
+	EDITOR_LIGHT				= BIT(5),
+	EDITOR_SOUND				= BIT(6),
+	EDITOR_DECL					= BIT(7),
+	EDITOR_AF					= BIT(8),
+	EDITOR_PDA					= BIT(9),
+	EDITOR_FX					= BIT(10),
+	EDITOR_REVERB				= BIT(11),
+	EDITOR_PLAYBACKS			= BIT(12),
+	EDITOR_MODVIEW				= BIT(13),
+	EDITOR_LOGVIEW				= BIT(14),
+	EDITOR_ENTVIEW				= BIT(15),
+	EDITOR_MATERIAL				= BIT(16),
+
+	// Flags used to suppress expensive/unsafe media caching during tools passes.
+	EDITOR_AAS					= BIT(17),
+	EDITOR_RENDERBUMP			= BIT(18),
+	EDITOR_SPAWN_GUI			= BIT(19),
+
+	// Set while decl editor validation is parsing potentially broken content.
+	EDITOR_DECL_VALIDATING		= BIT(20),
+
+	EDITOR_ALL					= -1,
+
+	// Legacy openQ4 tool aliases retained for old in-tree editor code.
+	EDITOR_PARTICLE				= EDITOR_FX,
+	EDITOR_ENTITYDEF			= EDITOR_DECL
+} toolFlag_t;
+
+#define STRTABLE_ID				"#str_"
+#define STRTABLE_ID_LENGTH		5
+
+// RAVEN BEGIN
+// mekberg: added more save types
+typedef enum {
+	ST_REGULAR,
+	ST_QUICK,
+	ST_AUTO,
+	ST_CHECKPOINT,
+} saveType_t;
+// RAVEN END
+
+extern idCVar		com_productionMode;
+
+// converted to a class so the idStr gets constructed
+class MemInfo {
+public:
+	MemInfo(void);
+
+	idStr			filebase;
+
+	int				total;
+	int				assetTotals;
+
+	// asset totals
+	int				imageAssetsTotal;
+	int				modelAssetsTotal;
+	int				soundAssetsTotal;
+	// RAVEN BEGIN
+	int				collAssetsTotal;
+	int				animsAssetsTotal;
+	int				aasAssetsTotal;
+
+	int				imageAssetsCount;
+	int				modelAssetsCount;
+	int				soundAssetsCount;
+	int				collAssetsCount;
+	int				animsAssetsCount;
+	int				aasAssetsCount;
+};
+// RAVEN END
+
+extern idCVar		com_version;
+extern idCVar		com_skipRenderer;
+extern idCVar		com_asyncInput;
+extern idCVar		com_asyncSound;
+extern idCVar		com_machineSpec;
+extern idCVar		com_purgeAll;
+extern idCVar		com_SingleDeclFile;
+extern idCVar		com_WriteSingleDeclFile;
+extern idCVar		com_developer;
+extern idCVar		con_allowConsole;
+extern idCVar		com_speeds;
+extern idCVar		com_showFPS;
+extern idCVar		com_maxfps;
+extern idCVar		com_showFramePacing;
+extern idCVar		com_showMemoryUsage;
+extern idCVar		com_showAsyncStats;
+extern idCVar		com_showSoundDecoders;
+extern idCVar		com_makingBuild;
+extern idCVar		com_updateLoadSize;
+extern idCVar		com_videoRam;
+
+extern int			time_gameFrame;			// game logic time
+extern int			time_gameDraw;			// game present time
+extern int			time_frontend;			// renderer frontend time
+extern int			time_backend;			// renderer backend time
+
+extern int			com_frameTime;			// simulation time for the current frame in milliseconds
+extern int			com_frameRealTime;		// presentation time for the current frame in milliseconds
+extern volatile int	com_ticNumber;			// 60 hz tics, incremented by async function
+extern int			com_editors;			// current active editor(s)
+extern bool			com_editorActive;		// true if an editor has focus
+
+#ifdef _WIN32
+const char			DMAP_MSGID[] = "DMAPOutput";
+const char			DMAP_DONE[] = "DMAPDone";
+extern HWND			com_hwndMsg;
+extern bool			com_outputMsg;
+#endif
+
+struct MemInfo_t {
+	idStr			filebase;
+
+	int				total;
+	int				assetTotals;
+
+	// memory manager totals
+	int				memoryManagerTotal;
+
+	// subsystem totals
+	int				gameSubsystemTotal;
+	int				renderSubsystemTotal;
+
+	// asset totals
+	int				imageAssetsTotal;
+	int				modelAssetsTotal;
+	int				soundAssetsTotal;
+};
+
+class idInterpreter;
+class idProgram;
+class rvISourceControl;
+
+struct openq4AsyncTimingStats_t {
+	bool			valid;
+	int				sampleCount;
+	int				lastDeltaMsec;
+	int				minDeltaMsec;
+	int				maxDeltaMsec;
+	float			avgDeltaMsec;
+	float			avgHz;
+	float			avgTimeConsumedMsec;
+	float			avgJitterMsec;
+};
+
+void				openQ4_GetAsyncTimingStats( openq4AsyncTimingStats_t &stats, int maxSamples = 60 );
+void				openQ4_BeginPresentationFrame( void );
+// The presentation cap the throttle actually paces to. Callers that budget work
+// against a frame period must use this rather than com_maxfps directly, or their
+// budget and the throttle's period disagree and they sleep away the difference.
+int					openQ4_GetRequestedPresentationCap( void );
+void				openQ4_SetLoadingContinueInputActive( bool active );
+bool				openQ4_AcceptingLoadingContinueInput( void );
+int					openQ4_GetActiveToolFlags( int flags );
+bool				openQ4_IsAnyToolActive( void );
+void				openQ4_ToolPrint( const char *text );
+bool				openQ4_ShouldCacheEntityDefMedia( bool noCaching );
+class idCommon {
+public:
+	virtual						~idCommon(void) {}
+
+	// Initialize everything.
+	// if the OS allows, pass argc/argv directly (without executable name)
+	// otherwise pass the command line in a single string (without executable name)
+	virtual void				Init(int argc, const char** argv, const char* cmdline) = 0;
+
+	// Shuts down everything.
+	virtual void				Shutdown(void) = 0;
+
+	// Shuts down everything.
+	virtual void				Quit(void) = 0;
+
+	// Returns true if common initialization is complete.
+	virtual bool				IsInitialized(void) const = 0;
+
+	// Called repeatedly as the foreground thread for rendering and game logic.
+	virtual void				Frame(void) = 0;
+
+	// Called repeatedly by blocking function calls with GUI interactivity.
+	virtual void				GUIFrame(bool execCmd, bool network) = 0;
+
+	// Called 60 times a second from a background thread for sound mixing,
+	// and input generation. Not called until idCommon::Init() has completed.
+	virtual void				Async(void) = 0;
+
+	// Checks for and removes command line "+set var arg" constructs.
+	// If match is NULL, all set commands will be executed, otherwise
+	// only a set with the exact name.  Only used during startup.
+	// set once to clear the cvar from +set for early init code
+	virtual void				StartupVariable(const char* match, bool once) = 0;
+
+	virtual int					GetUserCmdHz(void) const = 0;
+	virtual int					GetUserCmdMSec(void) const = 0;
+	virtual int					GetUserCmdTime(int ticNumber) const {
+		if ( ticNumber <= 0 ) {
+			return 0;
+		}
+		return static_cast<int>( ( static_cast<long long>( ticNumber ) * GetUserCmdMsecNumerator() ) / GetUserCmdMsecDenominator() );
+	}
+	virtual int					GetUserCmdDeltaMsec(int ticNumber) const {
+		return GetUserCmdTime( ticNumber ) - GetUserCmdTime( ticNumber - 1 );
+	}
+
+	// Returns com_frameTime - which is 0 if a command is added to the command line.
+	virtual int					GetFrameTime(void) const = 0;
+
+	// Returns whether the current game frame should present a renderable state.
+	virtual bool				IsRenderableGameFrame(void) const = 0;
+	virtual void				SetRenderableGameFrame(bool in) = 0;
+
+	// Returns the last message from common->Error.
+	virtual const char*			GetErrorMessage(void) const = 0;
+
+	// Initializes a tool with the given dictionary.
+	virtual void				InitTool(const int tool, const idDict* dict) = 0;
+
+	// Returns true if an editor currently has focus.
+	virtual bool				IsToolActive(void) const = 0;
+
+	// Returns an interface to source control when tool integrations provide one.
+	virtual rvISourceControl*	GetSourceControl(void) = 0;
+
+	// Activates or deactivates a tool.
+	virtual void				ActivateTool(bool active) = 0;
+
+	// Writes the user's configuration to a file
+	virtual void				WriteConfigToFile(const char* filename) = 0;
+
+	// Writes cvars with the given flags to a file.
+	virtual void				WriteFlaggedCVarsToFile(const char* filename, int flags, const char* setCmd) = 0;
+
+	// Modview thinks in the middle of a game frame.
+	virtual void				ModViewThink(void) = 0;
+
+	// Allows selected GUIs to process time events outside normal redraw.
+	virtual void				RunAlwaysThinkGUIs(int time) = 0;
+
+	// Script debugger hook to check if a breakpoint has been hit.
+	virtual void				DebuggerCheckBreakpoint(idInterpreter* interpreter, idProgram* program, int instructionPointer) = 0;
+
+	// Returns true while the decl editor is validating decl text.
+	virtual bool				DoingDeclValidation(void) = 0;
+
+	virtual void				SetCrashReportAutoSendString(const char* psString) = 0;
+
+	virtual void				LoadToolsDLL(void) = 0;
+	virtual void				UnloadToolsDLL(void) = 0;
+
+	// Begins redirection of console output to the given buffer.
+	virtual void				BeginRedirect(char* buffer, int buffersize, void (*flush)(const char*)) = 0;
+
+	// Stops redirection of console output.
+	virtual void				EndRedirect(void) = 0;
+
+	// Update the screen with every message printed.
+	virtual void				SetRefreshOnPrint(bool set) = 0;
+
+	// Prints message to the console, which may cause a screen update if com_refreshOnPrint is set.
+	virtual void				Printf(const char* fmt, ...)id_attribute((format(printf, 2, 3))) = 0;
+
+	// Same as Printf, with a more usable API - Printf pipes to this.
+	virtual void				VPrintf(const char* fmt, va_list arg) = 0;
+
+	// Prints the current frame-pacing diagnostics summary immediately.
+	virtual void				PrintFramePacingSnapshot( const char *reason = NULL ) = 0;
+
+	// Prints message that only shows up if the "developer" cvar is set,
+	// and NEVER forces a screen update, which could cause reentrancy problems.
+	virtual void				DPrintf(const char* fmt, ...) id_attribute((format(printf, 2, 3))) = 0;
+
+	// Prints WARNING %s message and adds the warning message to a queue for printing later on.
+	virtual void				Warning(const char* fmt, ...) id_attribute((format(printf, 2, 3))) = 0;
+
+	// Prints WARNING %s message in yellow that only shows up if the "developer" cvar is set.
+	virtual void				DWarning(const char* fmt, ...) id_attribute((format(printf, 2, 3))) = 0;
+
+	// Prints all queued warnings.
+	virtual void				PrintWarnings(void) = 0;
+
+	// Removes all queued warnings.
+	virtual void				ClearWarnings(const char* reason) = 0;
+
+	// Issues a C++ throw. Normal errors just abort to the game loop,
+	// which is appropriate for media or dynamic logic errors.
+	virtual void				Error(const char* fmt, ...) id_attribute((format(printf, 2, 3))) = 0;
+
+	// Fatal errors quit all the way to a system dialog box, which is appropriate for
+	// static internal errors or cases where the system may be corrupted.
+	virtual void				FatalError(const char* fmt, ...) id_attribute((format(printf, 2, 3))) = 0;
+
+	// Returns a pointer to the dictionary with language specific strings.
+	virtual const idLangDict* GetLanguageDict(void) = 0;
+
+	// Returns key bound to the command
+	virtual const char* KeysFromBinding(const char* bind) = 0;
+	virtual const char* KeysFromBindingForPrompt(const char* bind) = 0;
+
+	// Returns the binding bound to the key
+	virtual const char* BindingFromKey(const char* key) = 0;
+
+	// Directly sample a button.
+	virtual int					ButtonState(int key) = 0;
+
+	// Directly sample a keystate.
+	virtual int					KeyState(int key) = 0;
+
+	const char* GetLocalizedString(const char* key, int langIndex) { return GetLanguageDict()->GetString(key); }
+	const char* GetLocalizedString(const char* key) { return GetLanguageDict()->GetString(key); }
+
+	int GetUserCmdMsecNumerator(void) const { return 1000; }
+	int GetUserCmdMsecDenominator(void) const { return GetUserCmdHz(); }
+	float GetUserCmdMsecFloat(void) const { return static_cast<float>( GetUserCmdMsecNumerator() ) / static_cast<float>( GetUserCmdMsecDenominator() ); }
+	float GetUserCmdSec(void) const { return 1.0f / static_cast<float>( GetUserCmdHz() ); }
+	int GetPresentationTime(void) const {
+		return ( com_frameRealTime > 0 ) ? com_frameRealTime : com_frameTime;
+	}
+	int GetUserCmdTicsForMsecFloor(int msec) const {
+		if ( msec <= 0 ) {
+			return 0;
+		}
+		return static_cast<int>( ( static_cast<long long>( msec ) * GetUserCmdMsecDenominator() ) / GetUserCmdMsecNumerator() );
+	}
+	int GetUserCmdTicsForMsecCeil(int msec) const {
+		if ( msec <= 0 ) {
+			return 0;
+		}
+		return static_cast<int>( ( static_cast<long long>( msec ) * GetUserCmdMsecDenominator() + GetUserCmdMsecNumerator() - 1 ) / GetUserCmdMsecNumerator() );
+	}
+	int GetUserCmdMsecForTics(int ticCount) const {
+		return GetUserCmdTime( ticCount );
+	}
+	int GetUserCmdTimeAfterMsec(int msec, int ticCount) const {
+		return GetUserCmdTime( GetUserCmdTicsForMsecCeil( msec ) + ticCount );
+	}
+};
+
+extern idCommon* common;
+
+#endif /* !__COMMON_H__ */

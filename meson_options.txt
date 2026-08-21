@@ -1,0 +1,128 @@
+option(
+  'use_pch',
+  type: 'boolean',
+  value: true,
+  description: 'Compile src/idlib/precompiled.h as a PCH. When disabled, force-include it as a normal common header.',
+)
+
+option(
+  'build_engine',
+  type: 'boolean',
+  value: true,
+  description: 'Build engine executables (openQ4-client_<arch>/openQ4-ded_<arch>).',
+)
+
+option(
+  'build_games',
+  type: 'boolean',
+  value: true,
+  description: 'Build game modules (game-sp_<arch>/game-mp_<arch>) from the companion openQ4-game repository.',
+)
+
+option(
+  'build_game_sp',
+  type: 'boolean',
+  value: true,
+  description: 'Build the single-player game module (game-sp_<arch>).',
+)
+
+option(
+  'build_game_mp',
+  type: 'boolean',
+  value: true,
+  description: 'Build the multiplayer game module (game-mp_<arch>).',
+)
+
+option(
+  'build_renderer_vk',
+  type: 'boolean',
+  value: true,
+  description: 'Build the Vulkan renderer module (renderer-vk_<arch>). Requires the SDL3 platform backend. On macOS the module runs through MoltenVK, a Vulkan-on-Metal translation layer, and stays opt-in behind r_renderApi vulkan; see docs/dev/macos-moltenvk-decision.md.',
+)
+
+option(
+  'build_renderer_gl',
+  type: 'boolean',
+  value: true,
+  description: 'Build the OpenGL renderer module (renderer-gl_<arch>) from the same renderer sources the engine still links statically. Requires the SDL3 platform backend; skipped on macOS until the module path is validated there.',
+)
+
+option(
+  'platform_backend',
+  type: 'combo',
+  choices: ['sdl3', 'legacy_win32', 'native'],
+  value: 'sdl3',
+  description: 'Window/input backend. Windows: sdl3 or legacy_win32. Linux/macOS: sdl3 or native. The macOS native backend is comparison-only; release packages use sdl3.',
+)
+
+option(
+  'linux_x11',
+  type: 'feature',
+  value: 'auto',
+  description: 'Linux SDL3 X11/XWayland driver and optional engine X11 helpers. Disable for a native Wayland/EGL-only build.',
+)
+
+option(
+  'macos_graphics_bridge',
+  type: 'combo',
+  choices: ['opengl', 'metal'],
+  value: 'opengl',
+  description: 'macOS graphics bridge. metal keeps the SDL3/OpenGL renderer path but enables the Metal-ready SDL3/Cocoa integration surface for translation-layer bring-up.',
+)
+
+option(
+  'macos_openal_provider',
+  type: 'combo',
+  choices: ['apple_framework', 'system'],
+  value: 'apple_framework',
+  description: 'macOS OpenAL provider. apple_framework is the release default; system requires a pkg-config OpenAL Soft dependency plus OpenAL Soft-style AL/... headers for migration testing.',
+)
+
+option(
+  'version_track',
+  type: 'string',
+  value: 'dev',
+  description: 'Version track embedded into the build. Use stable for release builds, dev for local builds, or labels such as beta/rc for prerelease builds.',
+)
+
+option(
+  'version_iteration',
+  type: 'string',
+  value: '',
+  description: 'Optional dot-separated track iteration (for example 20260307.1). Only used for prerelease tracks.',
+)
+
+option(
+  'version_base_override',
+  type: 'string',
+  value: '',
+  description: 'Optional release version override used for generated build metadata without changing meson.build.',
+)
+
+option(
+  'openal_root_override',
+  type: 'string',
+  value: '',
+  description: 'Optional Windows OpenAL Soft root containing include/, lib/, and bin/ payloads. Useful for ARM64 builds that provide a custom OpenAL package.',
+)
+
+option(
+  'enforce_msvc_2026',
+  type: 'boolean',
+  value: false,
+  description: 'Fail configure when MSVC is older than the VS 2026 baseline (19.46+).',
+)
+
+option(
+  'idlib_asserts',
+  type: 'boolean',
+  value: false,
+  description: 'Compile idlib assert()/verify() into live checks on GCC/Clang. src/idlib/Lib.h keys them off _DEBUG, which no GCC/Clang openQ4 build defines, so every ownership and alignment assert is otherwise a no-op there. Enabled by the sanitizer lanes; note that AssertFailed raises SIGTRAP/SIGINT, so a firing assert stops the process.',
+)
+
+option(
+  'build_native_tests',
+  type: 'boolean',
+  value: false,
+  description: 'Build the small dependency-free native safety test executable used by validation profiles.',
+)

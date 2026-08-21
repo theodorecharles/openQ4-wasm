@@ -1,0 +1,1130 @@
+/*
+===========================================================================
+
+Doom 3 GPL Source Code
+Copyright (C) 1999-2011 id Software LLC, a ZeniMax Media company. 
+
+This file is part of the Doom 3 GPL Source Code (?Doom 3 Source Code?).  
+
+Doom 3 Source Code is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Doom 3 Source Code is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the Doom 3 Source Code is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+#include "../../idlib/precompiled.h"
+#include "../../renderer/tr_local.h"
+#include "local.h"
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+extern "C" {
+#	include "libXNVCtrl/NVCtrlLib.h"
+}
+
+idCVar sys_videoRam( "sys_videoRam", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "Texture memory on the video card (in megabytes) - 0: autodetect", 0, OPENQ4_LINUX_MAX_CONFIGURED_VIDEO_RAM_MB );
+
+Display *dpy = NULL;
+static int scrnum = 0;
+
+Window win = 0;
+
+bool dga_found = false;
+
+static GLXContext ctx = NULL;
+
+#ifndef GLX_CONTEXT_MAJOR_VERSION_ARB
+#define GLX_CONTEXT_MAJOR_VERSION_ARB		0x2091
+#endif
+#ifndef GLX_CONTEXT_MINOR_VERSION_ARB
+#define GLX_CONTEXT_MINOR_VERSION_ARB		0x2092
+#endif
+#ifndef GLX_CONTEXT_FLAGS_ARB
+#define GLX_CONTEXT_FLAGS_ARB				0x2094
+#endif
+#ifndef GLX_CONTEXT_DEBUG_BIT_ARB
+#define GLX_CONTEXT_DEBUG_BIT_ARB			0x0001
+#endif
+#ifndef GLX_CONTEXT_PROFILE_MASK_ARB
+#define GLX_CONTEXT_PROFILE_MASK_ARB		0x9126
+#endif
+#ifndef GLX_CONTEXT_CORE_PROFILE_BIT_ARB
+#define GLX_CONTEXT_CORE_PROFILE_BIT_ARB	0x00000001
+#endif
+#ifndef GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB
+#define GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
+#endif
+
+typedef GLXContext ( *glXCreateContextAttribsARBProc_t )( Display *, GLXFBConfig, GLXContext, Bool, const int * );
+typedef void ( *openq4GLXSwapIntervalEXTProc_t )( Display *, GLXDrawable, int );
+typedef int ( *openq4GLXSwapIntervalMESAProc_t )( unsigned int );
+typedef int ( *openq4GLXGetSwapIntervalMESAProc_t )( void );
+typedef int ( *openq4GLXSwapIntervalSGIProc_t )( int );
+
+static bool glx_context_create_error = false;
+static openq4GLXSwapIntervalEXTProc_t glx_swap_interval_ext = NULL;
+static openq4GLXSwapIntervalMESAProc_t glx_swap_interval_mesa = NULL;
+static openq4GLXGetSwapIntervalMESAProc_t glx_get_swap_interval_mesa = NULL;
+static openq4GLXSwapIntervalSGIProc_t glx_swap_interval_sgi = NULL;
+static bool glx_swap_control_tear_available = false;
+
+static bool vidmode_ext = false;
+static int vidmode_MajorVersion = 0, vidmode_MinorVersion = 0;	// major and minor of XF86VidExtensions
+
+static XF86VidModeModeInfo **vidmodes;
+static int num_vidmodes;
+static bool vidmode_active = false;
+
+// backup gamma ramp
+static int save_rampsize = 0;
+static unsigned short *save_red, *save_green, *save_blue;
+
+static void GLimp_FreeVidModes( void ) {
+	if ( vidmodes != NULL ) {
+		XFree( vidmodes );
+		vidmodes = NULL;
+	}
+	num_vidmodes = 0;
+}
+
+static void GLimp_RestoreDisplayMode( void ) {
+	if ( dpy != NULL && vidmode_active && vidmodes != NULL && num_vidmodes > 0 && vidmodes[0] != NULL ) {
+		XF86VidModeSwitchToMode( dpy, scrnum, vidmodes[0] );
+	}
+	vidmode_active = false;
+}
+
+static void GLimp_CloseDisplay( void ) {
+	if ( dpy == NULL ) {
+		return;
+	}
+
+	XSync( dpy, False );
+	XCloseDisplay( dpy );
+	dpy = NULL;
+	scrnum = 0;
+}
+
+void GLimp_WakeBackEnd(void *a) {
+	common->DPrintf("GLimp_WakeBackEnd stub\n");
+}
+
+#ifdef ID_GL_HARDLINK
+void GLimp_EnableLogging(bool log) {
+	static bool logging;
+	if (log != logging)
+	{
+		common->DPrintf("GLimp_EnableLogging - disabled at compile time (ID_GL_HARDLINK)\n");
+		logging = log;
+	}
+}
+#endif
+
+void GLimp_FrontEndSleep() {
+	common->DPrintf("GLimp_FrontEndSleep stub\n");
+}
+
+void *GLimp_BackEndSleep() {
+	common->DPrintf("GLimp_BackEndSleep stub\n");
+	return 0;
+}
+
+bool GLimp_SpawnRenderThread(void (*a) ()) {
+	common->DPrintf("GLimp_SpawnRenderThread stub\n");
+	return false;
+}
+
+bool GLimp_EnsureActiveContext( const char *operation ) {
+	if ( dpy == NULL || ctx == NULL || win == 0 ) {
+		common->Printf( "GLX: cannot make GL context current for %s: missing display, window, or context\n", operation != NULL ? operation : "operation" );
+		return false;
+	}
+	if ( !glXMakeCurrent( dpy, win, ctx ) ) {
+		common->Printf( "GLX: glXMakeCurrent failed for %s\n", operation != NULL ? operation : "operation" );
+		return false;
+	}
+	return true;
+}
+
+void GLimp_ActivateContext() {
+	(void)GLimp_EnsureActiveContext( "activate context" );
+}
+
+void GLimp_DeactivateContext() {
+	assert( dpy );
+	glXMakeCurrent( dpy, None, NULL );
+}
+
+static int GLX_ContextCreateErrorHandler( Display *display, XErrorEvent *event ) {
+	(void)display;
+	(void)event;
+	glx_context_create_error = true;
+	return 0;
+}
+
+static GLXFBConfig GLX_FindFBConfigForVisual( XVisualInfo *visinfo ) {
+	if ( visinfo == NULL ) {
+		return NULL;
+	}
+
+	int fbConfigCount = 0;
+	GLXFBConfig *fbConfigs = glXGetFBConfigs( dpy, scrnum, &fbConfigCount );
+	if ( fbConfigs == NULL ) {
+		return NULL;
+	}
+
+	GLXFBConfig match = NULL;
+	for ( int i = 0; i < fbConfigCount; ++i ) {
+		XVisualInfo *configVisual = glXGetVisualFromFBConfig( dpy, fbConfigs[i] );
+		if ( configVisual != NULL ) {
+			if ( configVisual->visualid == visinfo->visualid ) {
+				match = fbConfigs[i];
+				XFree( configVisual );
+				break;
+			}
+			XFree( configVisual );
+		}
+	}
+
+	XFree( fbConfigs );
+	return match;
+}
+
+static void *GLX_GetProcAddressForName( const char *name ) {
+	void *proc = NULL;
+#if defined( GLX_VERSION_1_4 )
+	proc = reinterpret_cast<void *>( glXGetProcAddress( reinterpret_cast<const GLubyte *>( name ) ) );
+#endif
+	if ( proc == NULL ) {
+		proc = reinterpret_cast<void *>( glXGetProcAddressARB( reinterpret_cast<const GLubyte *>( name ) ) );
+	}
+	return proc;
+}
+
+static glXCreateContextAttribsARBProc_t GLX_GetCreateContextAttribsProc( void ) {
+	return reinterpret_cast<glXCreateContextAttribsARBProc_t>( GLX_GetProcAddressForName( "glXCreateContextAttribsARB" ) );
+}
+
+static bool GLX_CreateContextForCandidate(
+	const rendererContextCandidate_t &candidate,
+	XVisualInfo *visinfo,
+	GLXFBConfig fbConfig,
+	glXCreateContextAttribsARBProc_t createContextAttribsProc ) {
+	if ( candidate.explicitVersion ) {
+		if ( fbConfig == NULL || createContextAttribsProc == NULL ) {
+			return false;
+		}
+
+		int attribs[11];
+		int attribCount = 0;
+		attribs[attribCount++] = GLX_CONTEXT_MAJOR_VERSION_ARB;
+		attribs[attribCount++] = candidate.major;
+		attribs[attribCount++] = GLX_CONTEXT_MINOR_VERSION_ARB;
+		attribs[attribCount++] = candidate.minor;
+		attribs[attribCount++] = GLX_CONTEXT_PROFILE_MASK_ARB;
+		attribs[attribCount++] = ( candidate.profile == RENDERER_CONTEXT_PROFILE_CORE )
+			? GLX_CONTEXT_CORE_PROFILE_BIT_ARB
+			: GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+		if ( candidate.debugContext ) {
+			attribs[attribCount++] = GLX_CONTEXT_FLAGS_ARB;
+			attribs[attribCount++] = GLX_CONTEXT_DEBUG_BIT_ARB;
+		}
+		attribs[attribCount++] = None;
+
+		glx_context_create_error = false;
+		XErrorHandler oldHandler = XSetErrorHandler( GLX_ContextCreateErrorHandler );
+		ctx = createContextAttribsProc( dpy, fbConfig, NULL, True, attribs );
+		XSync( dpy, False );
+		XSetErrorHandler( oldHandler );
+		if ( glx_context_create_error ) {
+			if ( ctx != NULL ) {
+				glXDestroyContext( dpy, ctx );
+				ctx = NULL;
+			}
+			return false;
+		}
+	} else {
+		ctx = glXCreateContext( dpy, visinfo, NULL, True );
+	}
+
+	if ( ctx == NULL ) {
+		return false;
+	}
+
+	memset( &glConfig.contextRequest, 0, sizeof( glConfig.contextRequest ) );
+	glConfig.contextRequest = candidate;
+	return true;
+}
+
+static bool GLX_CreateContextWithLadder( XVisualInfo *visinfo ) {
+	rendererContextCandidate_t candidates[RENDERER_CONTEXT_LADDER_MAX_CANDIDATES];
+	const rendererTierPreference_t preference = RendererTierPreference_FromString( r_glTier.GetString() );
+	const bool keepAutoCompatibility = preference == RENDERER_TIER_PREF_AUTO;
+	const int candidateCount = RendererContextLadder_Build(
+		candidates,
+		static_cast<int>( sizeof( candidates ) / sizeof( candidates[0] ) ),
+		preference,
+		r_glDebugContext.GetBool(),
+		keepAutoCompatibility );
+	if ( candidateCount <= 0 ) {
+		common->Printf( "GLX: no OpenGL context candidates were generated for r_glTier %s\n", r_glTier.GetString() );
+		return false;
+	}
+
+	GLXFBConfig fbConfig = GLX_FindFBConfigForVisual( visinfo );
+	glXCreateContextAttribsARBProc_t createContextAttribsProc = GLX_GetCreateContextAttribsProc();
+	for ( int i = 0; i < candidateCount; ++i ) {
+		const rendererContextCandidate_t &candidate = candidates[i];
+		common->Printf( "GLX: trying OpenGL context %s\n", candidate.label );
+		if ( GLX_CreateContextForCandidate( candidate, visinfo, fbConfig, createContextAttribsProc ) ) {
+			common->Printf( "GLX: created OpenGL context %s\n", glConfig.contextRequest.label );
+			return true;
+		}
+		common->Printf( "GLX: OpenGL context %s failed\n", candidate.label );
+	}
+
+	return false;
+}
+
+static bool GLX_HasExtension( const char *extensions, const char *extension ) {
+	if ( extensions == NULL || extension == NULL || extension[0] == '\0' ) {
+		return false;
+	}
+
+	const size_t extensionLength = strlen( extension );
+	const char *cursor = extensions;
+	while ( ( cursor = strstr( cursor, extension ) ) != NULL ) {
+		const bool startsToken = ( cursor == extensions || cursor[-1] == ' ' );
+		const char after = cursor[extensionLength];
+		const bool endsToken = ( after == '\0' || after == ' ' );
+		if ( startsToken && endsToken ) {
+			return true;
+		}
+		cursor += extensionLength;
+	}
+
+	return false;
+}
+
+static void GLX_ResetSwapControl( void ) {
+	glx_swap_interval_ext = NULL;
+	glx_swap_interval_mesa = NULL;
+	glx_get_swap_interval_mesa = NULL;
+	glx_swap_interval_sgi = NULL;
+	glx_swap_control_tear_available = false;
+}
+
+static void GLX_InitSwapControl( void ) {
+	GLX_ResetSwapControl();
+
+	const char *extensions = NULL;
+	if ( dpy != NULL ) {
+		extensions = glXQueryExtensionsString( dpy, scrnum );
+	}
+
+	const bool hasExtSwapControl = GLX_HasExtension( extensions, "GLX_EXT_swap_control" );
+	const bool hasMesaSwapControl = GLX_HasExtension( extensions, "GLX_MESA_swap_control" );
+	const bool hasSgiSwapControl = GLX_HasExtension( extensions, "GLX_SGI_swap_control" );
+	glx_swap_control_tear_available = GLX_HasExtension( extensions, "GLX_EXT_swap_control_tear" );
+
+	if ( hasExtSwapControl ) {
+		glx_swap_interval_ext = reinterpret_cast<openq4GLXSwapIntervalEXTProc_t>( GLX_GetProcAddressForName( "glXSwapIntervalEXT" ) );
+	}
+	if ( hasMesaSwapControl ) {
+		glx_swap_interval_mesa = reinterpret_cast<openq4GLXSwapIntervalMESAProc_t>( GLX_GetProcAddressForName( "glXSwapIntervalMESA" ) );
+		glx_get_swap_interval_mesa = reinterpret_cast<openq4GLXGetSwapIntervalMESAProc_t>( GLX_GetProcAddressForName( "glXGetSwapIntervalMESA" ) );
+	}
+	if ( hasSgiSwapControl ) {
+		glx_swap_interval_sgi = reinterpret_cast<openq4GLXSwapIntervalSGIProc_t>( GLX_GetProcAddressForName( "glXSwapIntervalSGI" ) );
+	}
+
+	common->Printf(
+		"GLX: swap control: EXT=%s MESA=%s SGI=%s tear=%s\n",
+		glx_swap_interval_ext != NULL ? "yes" : "no",
+		glx_swap_interval_mesa != NULL ? "yes" : "no",
+		glx_swap_interval_sgi != NULL ? "yes" : "no",
+		glx_swap_control_tear_available ? "yes" : "no" );
+}
+
+static bool GLX_NormalizeSwapIntervalForBackend(
+	int requestedInterval,
+	bool supportsZero,
+	bool supportsNegative,
+	const char *backendName,
+	int &interval ) {
+	interval = requestedInterval;
+
+	if ( interval < -1 ) {
+		common->Printf( "GLX: requested swap interval %d is below the supported adaptive interval; using -1.\n", requestedInterval );
+		interval = -1;
+	}
+	if ( interval < 0 && !supportsNegative ) {
+		common->Printf( "GLX: swap interval %d requested, but %s cannot request adaptive VSync; using interval 1.\n", requestedInterval, backendName );
+		interval = 1;
+	}
+	if ( interval == 0 && !supportsZero ) {
+		common->Printf( "GLX: swap interval 0 requested, but %s cannot force VSync off.\n", backendName );
+		return false;
+	}
+
+	return true;
+}
+
+static bool GLX_ApplySwapInterval( void ) {
+	if ( dpy == NULL || win == 0 || ctx == NULL ) {
+		return false;
+	}
+
+	const int requestedInterval = R_GetEffectiveSwapInterval();
+	int interval = requestedInterval;
+
+	if ( glx_swap_interval_ext != NULL &&
+			GLX_NormalizeSwapIntervalForBackend( requestedInterval, true, glx_swap_control_tear_available, "GLX_EXT_swap_control", interval ) ) {
+		glx_swap_interval_ext( dpy, static_cast<GLXDrawable>( win ), interval );
+		XSync( dpy, False );
+		if ( interval == requestedInterval ) {
+			common->Printf( "GLX: swap interval set to %d via GLX_EXT_swap_control\n", interval );
+		} else {
+			common->Printf( "GLX: requested swap interval %d, applied %d via GLX_EXT_swap_control\n", requestedInterval, interval );
+		}
+		return true;
+	}
+
+	if ( glx_swap_interval_mesa != NULL &&
+			GLX_NormalizeSwapIntervalForBackend( requestedInterval, true, false, "GLX_MESA_swap_control", interval ) ) {
+		const int result = glx_swap_interval_mesa( static_cast<unsigned int>( interval ) );
+		if ( result != 0 ) {
+			common->Printf( "GLX: glXSwapIntervalMESA(%d) failed with code %d\n", interval, result );
+			return false;
+		}
+
+		const int actualInterval = glx_get_swap_interval_mesa != NULL ? glx_get_swap_interval_mesa() : interval;
+		if ( actualInterval == requestedInterval ) {
+			common->Printf( "GLX: swap interval set to %d via GLX_MESA_swap_control\n", actualInterval );
+		} else {
+			common->Printf( "GLX: requested swap interval %d, driver reports %d via GLX_MESA_swap_control\n", requestedInterval, actualInterval );
+		}
+		return true;
+	}
+
+	if ( glx_swap_interval_sgi != NULL &&
+			GLX_NormalizeSwapIntervalForBackend( requestedInterval, false, false, "GLX_SGI_swap_control", interval ) ) {
+		const int result = glx_swap_interval_sgi( interval );
+		if ( result != 0 ) {
+			common->Printf( "GLX: glXSwapIntervalSGI(%d) failed with code %d\n", interval, result );
+			return false;
+		}
+
+		if ( interval == requestedInterval ) {
+			common->Printf( "GLX: swap interval set to %d via GLX_SGI_swap_control\n", interval );
+		} else {
+			common->Printf( "GLX: requested swap interval %d, applied %d via GLX_SGI_swap_control\n", requestedInterval, interval );
+		}
+		return true;
+	}
+
+	common->Printf( "GLX: swap interval %d requested, but no usable GLX swap-control extension is available\n", requestedInterval );
+	return false;
+}
+
+/*
+=================
+GLimp_SaveGamma
+
+save and restore the original gamma of the system
+=================
+*/
+void GLimp_SaveGamma() {
+	if ( save_rampsize ) {
+		return;
+	}
+
+	assert( dpy );
+
+	int rampSize = 0;
+	if ( !XF86VidModeGetGammaRampSize( dpy, scrnum, &rampSize ) || rampSize <= 0 ) {
+		return;
+	}
+
+	save_red = (unsigned short *)malloc( rampSize * sizeof( unsigned short ) );
+	save_green = (unsigned short *)malloc( rampSize * sizeof( unsigned short ) );
+	save_blue = (unsigned short *)malloc( rampSize * sizeof( unsigned short ) );
+	if ( save_red == NULL || save_green == NULL || save_blue == NULL ) {
+		free( save_red );
+		free( save_green );
+		free( save_blue );
+		save_red = save_green = save_blue = NULL;
+		return;
+	}
+
+	if ( !XF86VidModeGetGammaRamp( dpy, scrnum, rampSize, save_red, save_green, save_blue ) ) {
+		free( save_red );
+		free( save_green );
+		free( save_blue );
+		save_red = save_green = save_blue = NULL;
+		return;
+	}
+
+	save_rampsize = rampSize;
+}
+
+/*
+=================
+GLimp_RestoreGamma
+
+save and restore the original gamma of the system
+=================
+*/
+void GLimp_RestoreGamma() {
+	if ( !save_rampsize || dpy == NULL || save_red == NULL || save_green == NULL || save_blue == NULL ) {
+		return;
+	}
+
+	XF86VidModeSetGammaRamp( dpy, scrnum, save_rampsize, save_red, save_green, save_blue);
+	
+	free(save_red); free(save_green); free(save_blue);
+	save_red = save_green = save_blue = NULL;
+	save_rampsize = 0;
+}
+
+/*
+=================
+GLimp_SetGamma
+
+gamma ramp is generated by the renderer from r_gamma and r_brightness for 256 elements
+the size of the gamma ramp can not be changed on X (I need to confirm this)
+=================
+*/
+void GLimp_SetGamma(unsigned short red[256], unsigned short green[256], unsigned short blue[256]) {
+	if ( dpy ) {		
+		int size = 0;
+		
+		GLimp_SaveGamma();
+		if ( !XF86VidModeGetGammaRampSize( dpy, scrnum, &size ) || size <= 0 ) {
+			return;
+		}
+		common->DPrintf("XF86VidModeGetGammaRampSize: %d\n", size);
+		if ( size > 256 ) {
+			// silly generic resample
+			int i;
+			unsigned short *l_red, *l_green, *l_blue;
+			l_red = (unsigned short *)malloc(size*sizeof(unsigned short));
+			l_green = (unsigned short *)malloc(size*sizeof(unsigned short));
+			l_blue = (unsigned short *)malloc(size*sizeof(unsigned short));
+			if ( l_red == NULL || l_green == NULL || l_blue == NULL ) {
+				free( l_red );
+				free( l_green );
+				free( l_blue );
+				return;
+			}
+			//int r_size = 256;
+			int r_i; float r_f;
+			for(i=0; i<size-1; i++) {
+				r_f = (float)i*255.0f/(float)(size-1);
+				r_i = (int)floor(r_f);
+				r_f -= (float)r_i;
+				l_red[i] = (int)round((1.0f-r_f)*(float)red[r_i]+r_f*(float)red[r_i+1]);
+				l_green[i] = (int)round((1.0f-r_f)*(float)green[r_i]+r_f*(float)green[r_i+1]);
+				l_blue[i] = (int)round((1.0f-r_f)*(float)blue[r_i]+r_f*(float)blue[r_i+1]);				
+			}
+			l_red[size-1] = red[255]; l_green[size-1] = green[255]; l_blue[size-1] = blue[255];
+			XF86VidModeSetGammaRamp( dpy, scrnum, size, l_red, l_green, l_blue );
+			free(l_red); free(l_green); free(l_blue);
+		} else {
+			XF86VidModeSetGammaRamp( dpy, scrnum, size, red, green, blue );
+		}
+	}
+}
+
+bool GLimp_UseNativeGammaRamps( void ) {
+	return true;
+}
+
+void GLimp_Shutdown() {
+	if ( dpy ) {
+		
+		if ( win != 0 ) {
+			Sys_XUninstallGrabs();
+		}
+	
+		GLimp_RestoreGamma();
+
+		if ( ctx != NULL ) {
+			glXMakeCurrent( dpy, None, NULL );
+			glXDestroyContext( dpy, ctx );
+			ctx = NULL;
+		}
+		GLX_ResetSwapControl();
+
+		GLimp_RestoreDisplayMode();
+
+		if ( win != 0 ) {
+			XDestroyWindow( dpy, win );
+			win = 0;
+		}
+
+		GLimp_FreeVidModes();
+		GLimp_CloseDisplay();
+
+#if !defined( ID_GL_HARDLINK )
+		GLimp_dlclose();
+#endif
+	}
+}
+
+void GLimp_PreserveWindowOnShutdown( bool preserve ) {
+	(void)preserve;
+}
+
+void GLimp_SwapBuffers() {
+	assert( dpy );
+	if ( r_swapInterval.IsModified() ) {
+		r_swapInterval.ClearModified();
+		(void)GLX_ApplySwapInterval();
+	}
+	glXSwapBuffers( dpy, win );
+}
+
+/*
+GLX_TestDGA
+Check for DGA	- update in_dgamouse if needed
+*/
+void GLX_TestDGA() {
+	assert( dpy );
+
+#if defined( ID_ENABLE_DGA )
+	int dga_MajorVersion = 0, dga_MinorVersion = 0;
+
+	if ( !XF86DGAQueryVersion( dpy, &dga_MajorVersion, &dga_MinorVersion ) ) {
+		// unable to query, probalby not supported
+		common->Printf( "Failed to detect DGA DirectVideo Mouse\n" );
+		cvarSystem->SetCVarBool( "in_dgamouse", false );
+		dga_found = false;
+	} else {
+		common->Printf( "DGA DirectVideo Mouse (Version %d.%d) initialized\n",
+				   dga_MajorVersion, dga_MinorVersion );
+		dga_found = true;
+	}
+#else
+    dga_found = false;
+#endif
+}
+
+/*
+** XErrorHandler
+**   the default X error handler exits the application
+**   I found out that on some hosts some operations would raise X errors (GLXUnsupportedPrivateRequest)
+**   but those don't seem to be fatal .. so the default would be to just ignore them
+**   our implementation mimics the default handler behaviour (not completely cause I'm lazy)
+*/
+int idXErrorHandler(Display * l_dpy, XErrorEvent * ev) {
+	char buf[1024];
+	common->Printf( "Fatal X Error:\n" );
+	common->Printf( "  Major opcode of failed request: %d\n", ev->request_code );
+	common->Printf( "  Minor opcode of failed request: %d\n", ev->minor_code );
+	common->Printf( "  Serial number of failed request: %lu\n", ev->serial );
+	XGetErrorText( l_dpy, ev->error_code, buf, 1024 );
+	common->Printf( "%s\n", buf );
+	return 0;
+}
+
+bool GLimp_OpenDisplay( void ) {
+	if ( dpy ) {
+		return true;
+	}
+
+	if ( cvarSystem->GetCVarInteger( "net_serverDedicated" ) == 1 ) {
+		common->DPrintf( "not opening the display: dedicated server\n" );
+		return false;
+	}
+
+	common->Printf( "Setup X display connection\n" );
+
+	// that should be the first call into X
+	if ( !XInitThreads() ) {
+		common->Printf("XInitThreads failed\n");
+		return false;
+	}
+	
+	// set up our custom error handler for X failures
+	XSetErrorHandler( &idXErrorHandler );
+
+	if ( !( dpy = XOpenDisplay(NULL) ) ) {
+		common->Printf( "Couldn't open the X display\n" );
+		return false;
+	}
+	scrnum = DefaultScreen( dpy );
+	return true;
+}
+
+/*
+================
+Sys_GetDesktopResolution
+================
+*/
+bool Sys_GetDesktopResolution( int *width, int *height ) {
+	if ( width == NULL || height == NULL ) {
+		return false;
+	}
+	if ( !GLimp_OpenDisplay() || dpy == NULL ) {
+		return false;
+	}
+
+	const int desktopWidth = DisplayWidth( dpy, scrnum );
+	const int desktopHeight = DisplayHeight( dpy, scrnum );
+	if ( desktopWidth <= 0 || desktopHeight <= 0 ) {
+		return false;
+	}
+
+	*width = desktopWidth;
+	*height = desktopHeight;
+	return true;
+}
+
+/*
+===============
+GLX_Init
+===============
+*/
+int GLX_Init(glimpParms_t a) {
+	int attrib[] = {
+		GLX_RGBA,				// 0
+		GLX_RED_SIZE, 8,		// 1, 2
+		GLX_GREEN_SIZE, 8,		// 3, 4
+		GLX_BLUE_SIZE, 8,		// 5, 6
+		GLX_DOUBLEBUFFER,		// 7
+		GLX_DEPTH_SIZE, 24,		// 8, 9
+		GLX_STENCIL_SIZE, 8,	// 10, 11
+		GLX_ALPHA_SIZE, 8, // 12, 13
+		None
+	};
+	// these match in the array
+#define ATTR_RED_IDX 2
+#define ATTR_GREEN_IDX 4
+#define ATTR_BLUE_IDX 6
+#define ATTR_DEPTH_IDX 9
+#define ATTR_STENCIL_IDX 11
+#define ATTR_ALPHA_IDX 13
+	Window root;
+	XVisualInfo *visinfo;
+	XSetWindowAttributes attr;
+	XSizeHints sizehints;
+	unsigned long mask;
+	int colorbits, depthbits, stencilbits;
+	int tcolorbits, tdepthbits, tstencilbits;
+	int actualWidth, actualHeight;
+	int i;
+	const char *glstring;
+
+	if ( !GLimp_OpenDisplay() ) {
+		return false;
+	}
+
+	common->Printf( "Initializing OpenGL display\n" );
+
+	root = RootWindow( dpy, scrnum );
+
+	actualWidth = glConfig.vidWidth;
+	actualHeight = glConfig.vidHeight;
+
+	// Get video mode list
+	if ( !XF86VidModeQueryVersion( dpy, &vidmode_MajorVersion, &vidmode_MinorVersion ) ) {
+		vidmode_ext = false;
+		common->Printf("XFree86-VidModeExtension not available\n");
+	} else {
+		vidmode_ext = true;
+		common->Printf("Using XFree86-VidModeExtension Version %d.%d\n",
+				   vidmode_MajorVersion, vidmode_MinorVersion);
+	}
+
+	GLX_TestDGA();
+
+	if ( vidmode_ext ) {
+		GLimp_FreeVidModes();
+		if ( !XF86VidModeGetAllModeLines( dpy, scrnum, &num_vidmodes, &vidmodes ) || vidmodes == NULL || num_vidmodes <= 0 ) {
+			common->Printf( "XFree86-VidModeExtension: no usable modes reported\n" );
+			GLimp_FreeVidModes();
+			vidmode_ext = false;
+		}
+	}
+
+	if ( vidmode_ext ) {
+		int best_fit, best_dist, dist, x, y;
+
+		// Are we going fullscreen?  If so, let's change video mode
+		if ( a.fullScreen ) {
+			best_dist = 9999999;
+			best_fit = -1;
+
+			for (i = 0; i < num_vidmodes; i++) {
+				if ( vidmodes[i] == NULL ) {
+					continue;
+				}
+				if (a.width > vidmodes[i]->hdisplay ||
+					a.height > vidmodes[i]->vdisplay)
+					continue;
+
+				x = a.width - vidmodes[i]->hdisplay;
+				y = a.height - vidmodes[i]->vdisplay;
+				dist = (x * x) + (y * y);
+				if (dist < best_dist) {
+					best_dist = dist;
+					best_fit = i;
+				}
+			}
+
+			if (best_fit != -1) {
+				actualWidth = vidmodes[best_fit]->hdisplay;
+				actualHeight = vidmodes[best_fit]->vdisplay;
+
+				// change to the mode
+				XF86VidModeSwitchToMode(dpy, scrnum, vidmodes[best_fit]);
+				vidmode_active = true;
+
+				// Move the viewport to top left
+				// FIXME: center?
+				XF86VidModeSetViewPort(dpy, scrnum, 0, 0);
+
+				common->Printf( "Free86-VidModeExtension Activated at %dx%d\n", actualWidth, actualHeight );
+
+			} else {
+				a.fullScreen = false;
+				common->Printf( "Free86-VidModeExtension: No acceptable modes found\n" );
+			}
+		} else {
+			common->Printf( "XFree86-VidModeExtension: not fullscreen, ignored\n" );
+		}
+	}
+	// color, depth and stencil
+	colorbits = 24;
+	depthbits = 24;
+	stencilbits = 8;
+
+	for (i = 0; i < 16; i++) {
+		// 0 - default
+		// 1 - minus colorbits
+		// 2 - minus depthbits
+		// 3 - minus stencil
+		if ((i % 4) == 0 && i) {
+			// one pass, reduce
+			switch (i / 4) {
+			case 2:
+				if (colorbits == 24)
+					colorbits = 16;
+				break;
+			case 1:
+				if (depthbits == 24)
+					depthbits = 16;
+				else if (depthbits == 16)
+					depthbits = 8;
+			case 3:
+				if (stencilbits == 24)
+					stencilbits = 16;
+				else if (stencilbits == 16)
+					stencilbits = 8;
+			}
+		}
+
+		tcolorbits = colorbits;
+		tdepthbits = depthbits;
+		tstencilbits = stencilbits;
+
+		if ((i % 4) == 3) {		// reduce colorbits
+			if (tcolorbits == 24)
+				tcolorbits = 16;
+		}
+
+		if ((i % 4) == 2) {		// reduce depthbits
+			if (tdepthbits == 24)
+				tdepthbits = 16;
+			else if (tdepthbits == 16)
+				tdepthbits = 8;
+		}
+
+		if ((i % 4) == 1) {		// reduce stencilbits
+			if (tstencilbits == 24)
+				tstencilbits = 16;
+			else if (tstencilbits == 16)
+				tstencilbits = 8;
+			else
+				tstencilbits = 0;
+		}
+
+		if (tcolorbits == 24) {
+			attrib[ATTR_RED_IDX] = 8;
+			attrib[ATTR_GREEN_IDX] = 8;
+			attrib[ATTR_BLUE_IDX] = 8;
+		} else {
+			// must be 16 bit
+			attrib[ATTR_RED_IDX] = 4;
+			attrib[ATTR_GREEN_IDX] = 4;
+			attrib[ATTR_BLUE_IDX] = 4;
+		}
+		
+		attrib[ATTR_DEPTH_IDX] = tdepthbits;	// default to 24 depth
+		attrib[ATTR_STENCIL_IDX] = tstencilbits;
+
+		visinfo = glXChooseVisual(dpy, scrnum, attrib);
+		if (!visinfo) {
+			continue;
+		}
+
+		common->Printf( "Using %d/%d/%d Color bits, %d Alpha bits, %d depth, %d stencil display.\n",
+			 attrib[ATTR_RED_IDX], attrib[ATTR_GREEN_IDX],
+			 attrib[ATTR_BLUE_IDX], attrib[ATTR_ALPHA_IDX],
+			 attrib[ATTR_DEPTH_IDX],
+			 attrib[ATTR_STENCIL_IDX]);
+
+		glConfig.colorBits = tcolorbits;
+		glConfig.depthBits = tdepthbits;
+		glConfig.stencilBits = tstencilbits;
+		break;
+	}
+
+	if (!visinfo) {
+		common->Printf("Couldn't get a visual\n");
+		GLimp_RestoreDisplayMode();
+		return false;
+	}
+	// window attributes
+	attr.background_pixel = BlackPixel(dpy, scrnum);
+	attr.border_pixel = 0;
+	attr.colormap = XCreateColormap(dpy, root, visinfo->visual, AllocNone);
+	attr.event_mask = X_MASK;
+	if (vidmode_active) {
+		mask = CWBackPixel | CWColormap | CWSaveUnder | CWBackingStore |
+			CWEventMask | CWOverrideRedirect;
+		attr.override_redirect = True;
+		attr.backing_store = NotUseful;
+		attr.save_under = False;
+	} else {
+		mask = CWBackPixel | CWBorderPixel | CWColormap | CWEventMask;
+	}
+
+	win = XCreateWindow(dpy, root, 0, 0,
+						actualWidth, actualHeight,
+						0, visinfo->depth, InputOutput,
+						visinfo->visual, mask, &attr);
+	if ( win == 0 ) {
+		common->Printf( "XCreateWindow failed\n" );
+		XFree( visinfo );
+		GLimp_RestoreDisplayMode();
+		return false;
+	}
+
+	XStoreName(dpy, win, GAME_NAME);
+
+	// don't let the window be resized
+	// FIXME: allow resize (win32 does)
+	sizehints.flags = PMinSize | PMaxSize;
+	sizehints.min_width = sizehints.max_width = actualWidth;
+	sizehints.min_height = sizehints.max_height = actualHeight;
+
+	XSetWMNormalHints(dpy, win, &sizehints);
+
+	XMapWindow( dpy, win );
+
+	if ( vidmode_active ) {
+		XMoveWindow( dpy, win, 0, 0 );
+	}
+
+	XFlush(dpy);
+	XSync(dpy, False);
+	if ( !GLX_CreateContextWithLadder( visinfo ) ) {
+		common->Printf( "Couldn't create a GLX context\n" );
+		XFree(visinfo);
+		XDestroyWindow( dpy, win );
+		win = 0;
+		GLimp_RestoreDisplayMode();
+		return false;
+	}
+	XSync(dpy, False);
+
+	// Free the visinfo after we're done with it
+	XFree(visinfo);
+
+	if ( !glXMakeCurrent(dpy, win, ctx) ) {
+		common->Printf( "glXMakeCurrent failed\n" );
+		glXDestroyContext( dpy, ctx );
+		ctx = NULL;
+		XDestroyWindow( dpy, win );
+		win = 0;
+		GLimp_RestoreDisplayMode();
+		return false;
+	}
+
+	GLX_InitSwapControl();
+	r_swapInterval.SetModified();
+	if ( r_swapInterval.IsModified() ) {
+		r_swapInterval.ClearModified();
+		(void)GLX_ApplySwapInterval();
+	}
+
+	glstring = (const char *) glGetString(GL_RENDERER);
+	common->Printf("GL_RENDERER: %s\n", glstring != NULL ? glstring : "<unknown>");
+	
+	glstring = (const char *) glGetString(GL_EXTENSIONS);
+	common->Printf("GL_EXTENSIONS: %s\n", glstring != NULL ? glstring : "<unavailable>");
+
+	// FIXME: here, software GL test
+
+	glConfig.isFullscreen = a.fullScreen;
+	
+	if ( glConfig.isFullscreen ) {
+		Sys_GrabMouseCursor( true );
+	}
+	
+	return true;
+}
+
+/*
+===================
+GLimp_Init
+
+This is the platform specific OpenGL initialization function.  It
+is responsible for loading OpenGL, initializing it,
+creating a window of the appropriate size, doing
+fullscreen manipulations, etc.  Its overall responsibility is
+to make sure that a functional OpenGL subsystem is operating
+when it returns to the ref.
+
+If there is any failure, the renderer will revert back to safe
+parameters and try again.
+===================
+*/
+bool GLimp_Init( glimpParms_t a ) {
+
+	if ( !GLimp_OpenDisplay() ) {
+		return false;
+	}
+	
+#ifndef ID_GL_HARDLINK
+	if ( !GLimp_dlopen() ) {
+		GLimp_Shutdown();
+		return false;
+	}
+#endif
+	
+	if (!GLX_Init(a)) {
+		GLimp_Shutdown();
+		return false;
+	}
+	
+	return true;
+}
+
+/*
+===================
+GLimp_SetScreenParms
+===================
+*/
+bool GLimp_SetScreenParms( glimpParms_t parms ) {
+	return true;
+}
+
+/*
+================
+Sys_GetVideoRam
+returns in megabytes
+open your own display connection for the query and close it
+using the one shared with GLimp_Init is not stable
+================
+*/
+int Sys_GetVideoRam( void ) {
+	static int run_once = 0;
+	int major, minor, value;
+	Display *l_dpy;
+	int l_scrnum;
+
+	if ( run_once ) {
+		return run_once;
+	}
+
+	if ( sys_videoRam.GetInteger() ) {
+		run_once = sys_videoRam.GetInteger();
+		return sys_videoRam.GetInteger();
+	}
+
+	// try a few strategies to guess the amount of video ram
+	common->Printf( "guessing video ram ( use +set sys_videoRam to force ) ..\n" );
+	if ( !GLimp_OpenDisplay( ) ) {
+		common->Printf( "guess failed, using conservative modern VRAM setting ( %dMB VRAM )\n", OPENQ4_LINUX_UNKNOWN_VIDEO_RAM_MB );
+		run_once = OPENQ4_LINUX_UNKNOWN_VIDEO_RAM_MB;
+		return run_once;
+	}
+	l_dpy = dpy;
+	l_scrnum = scrnum;
+	// go for nvidia ext first
+	if ( XNVCTRLQueryVersion( l_dpy, &major, &minor ) ) {
+		common->Printf( "found XNVCtrl extension %d.%d\n", major, minor );
+		if ( XNVCTRLIsNvScreen( l_dpy, l_scrnum ) ) {
+			if ( XNVCTRLQueryAttribute( l_dpy, l_scrnum, 0, NV_CTRL_VIDEO_RAM, &value ) ) {
+				run_once = value / 1024;
+				return run_once;
+			} else {
+				common->Printf( "XNVCtrlQueryAttribute NV_CTRL_VIDEO_RAM failed\n" );
+			}
+		} else {
+			common->Printf( "default screen %d is not controlled by NVIDIA driver\n", l_scrnum );
+		}
+	}
+	// try ATI /proc read ( for the lack of a better option )
+	int fd;
+	if ( ( fd = open( "/proc/dri/0/umm", O_RDONLY ) ) != -1 ) {
+		int len;
+		char umm_buf[ 1024 ];
+		char *line;
+		len = read( fd, umm_buf, sizeof( umm_buf ) );
+		close( fd );
+		if ( len > 1 ) {
+			// should be way enough to get the full file
+			// grab "free  LFB = " line and "free  Inv = " lines
+			umm_buf[ len-1 ] = '\0';
+			line = umm_buf;
+			line = strtok( umm_buf, "\n" );
+			int total = 0;
+			while ( line ) {
+				if ( strlen( line ) >= 13 && strstr( line, "max   LFB =" ) == line ) {
+					total += atoi( line + 12 );
+				} else if ( strlen( line ) >= 13 && strstr( line, "max   Inv =" ) == line ) {
+					total += atoi( line + 12 );
+				}
+				line = strtok( NULL, "\n" );
+			}
+			if ( total ) {
+				run_once = total / 1048576;
+				// round to the lower 16Mb
+				run_once &= ~15;
+				return run_once;
+			}
+		} else if ( len == -1 ) {
+			common->Printf( "read /proc/dri/0/umm failed: %s\n", strerror( errno ) );
+		}
+	}
+	common->Printf( "guess failed, using conservative modern VRAM setting ( %dMB VRAM )\n", OPENQ4_LINUX_UNKNOWN_VIDEO_RAM_MB );
+	run_once = OPENQ4_LINUX_UNKNOWN_VIDEO_RAM_MB;
+	return run_once;
+}
+
+// Phase B5b window-services seam: this backend does not implement it; the
+// SDL3 backend provides the real table
+#include "../../renderer/RenderModuleAPI.h"
+const renderWindowServices_t *Sys_GetRenderWindowServices( void ) {
+	return NULL;
+}

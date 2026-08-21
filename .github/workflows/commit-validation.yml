@@ -1,0 +1,1338 @@
+name: Commit Validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: openq4-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  script-smoke:
+    name: Validation Script Smoke
+    runs-on: ubuntu-24.04
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Check validation script syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            tools/build/build_openq4_pack.py \
+            tools/build/build_pak0.py \
+            tools/build/build_windows_installer.py \
+            tools/build/check_staged_content_edits.py \
+            tools/build/generate_pak_header.py \
+            tools/build/generate_release_changelog.py \
+            tools/build/generate_release_docs.py \
+            tools/build/linux_metadata.py \
+            tools/build/list_pak_sources.py \
+            tools/build/openq4_pak.py \
+            tools/build/openq4_release_version.py \
+            tools/build/openq4_version.py \
+            tools/build/assemble_macos_universal2.py \
+            tools/build/package_nightly.py \
+            tools/build/package_release.py \
+            tools/build/verify_linux_arm64_release_evidence.py \
+            tools/build/stage_fast_install.py \
+            tools/build/stage_gamelibs.py \
+            tools/build/stage_windows_runtime.py \
+            tools/build/sync_icons.py \
+            tools/build/windows_runtime.py \
+            tools/build/write_pak_manifest.py \
+            src/sys/linux/pk4/id_utils.py \
+            tools/analysis/clang_tidy_input_safety.py \
+            tools/validation/openq4_validate.py \
+            tools/tests/renderer_validation_matrix.py \
+            tools/tests/arena_campaign.py \
+            tools/tests/async_drop_client_contract.py \
+            tools/tests/campaign_split_state_transition.py \
+            tools/tests/clang_tidy_input_safety.py \
+            tools/tests/cmdargs_append_contract.py \
+            tools/tests/competitive_match_layer.py \
+            tools/tests/competitive_match_localization.py \
+            tools/tests/decl_checksum_stability_contract.py \
+            tools/tests/match_control_localization_bridge.py \
+            tools/tests/match_control_ui_contract.py \
+            tools/tests/demo_playback.py \
+            tools/tests/docs_link_integrity.py \
+            tools/tests/fatal_error_startup_safety.py \
+            tools/tests/filesystem_case_segments.py \
+            tools/tests/filesystem_mod_manifest.py \
+            tools/tests/filesystem_write_qpath_safety.py \
+            tools/tests/game_class_allocator_alignment.py \
+            tools/tests/game_type_module_selection.py \
+            tools/tests/gamelibs_staging.py \
+            tools/tests/generated_animation_cache.py \
+            tools/tests/hdr_postprocess_math.py \
+            tools/tests/idstr_input_safety.py \
+            tools/tests/lexer_peek_contract.py \
+            tools/tests/key_bind_presentation.py \
+            tools/tests/levelshot_inventory.py \
+            tools/tests/linux_arm64_cross_compile.py \
+            tools/tests/linux_arm64_ci_coverage.py \
+            tools/tests/linux_arm64_release_evidence.py \
+            tools/tests/linux_arm64_source_portability.py \
+            tools/tests/linux_dedicated_server_smoke.py \
+            tools/tests/linux_dedicated_server_smoke_contract.py \
+            tools/tests/linux_dedicated_stock_map_smoke.py \
+            tools/tests/linux_dedicated_stock_map_smoke_contract.py \
+            tools/tests/linux_physical_host_evidence.py \
+            tools/tests/linux_physical_host_evidence_contract.py \
+            tools/tests/linux_wayland_stock_sp_smoke.py \
+            tools/tests/linux_wayland_stock_sp_smoke_contract.py \
+            tools/tests/linux_gui_presentation_defaults.py \
+            tools/tests/linux_highdpi_mouse.py \
+            tools/tests/linux_appimage_packaging.py \
+            tools/tests/lang_table_encoding.py \
+            tools/tests/source_charset_integrity.py \
+            tools/tests/linux_metadata_fuzz.py \
+            tools/tests/linux_packaging_guidance.py \
+            tools/tests/linux_sanitizer_ci.py \
+            tools/tests/linux_sdl3_glew_loader.py \
+            tools/tests/linux_vsync_support.py \
+            tools/tests/linux_wayland_build_contract.py \
+            tools/tests/loading_continue_input.py \
+            tools/tests/loading_pacifier_pacing.py \
+            tools/tests/map_entity_strings.py \
+            tools/tests/macos_apple_gl21_arb2_corridor.py \
+            tools/tests/macos_dedicated_server_smoke.py \
+            tools/tests/macos_dedicated_server_smoke_contract.py \
+            tools/tests/macos_evidence_plumbing.py \
+            tools/tests/macos_evidence_recording.py \
+            tools/tests/macos_gamelibs_alignment.py \
+            tools/tests/macos_intel_ci.py \
+            tools/tests/macos_local_validation_track.py \
+            tools/tests/macos_matrix_policy.py \
+            tools/tests/macos_native_backend_guard.py \
+            tools/tests/macos_native_backend_containment.py \
+            tools/tests/macos_openal_provider_policy.py \
+            tools/tests/macos_package_policy.py \
+            tools/tests/macos_package_robustness.py \
+            tools/tests/macos_renderer_backend_policy.py \
+            tools/tests/macos_renderer_phase_breadcrumbs.py \
+            tools/tests/macos_renderer_startup_guard.py \
+            tools/tests/macos_sanitizer_ci.py \
+            tools/tests/macos_sdl3_backend_guard.py \
+            tools/tests/macos_shadow_policy.py \
+            tools/tests/macos_signoff_archive.py \
+            tools/tests/macos_static_policy.py \
+            tools/tests/macos_support_claim_policy.py \
+            tools/tests/macos_support_intake.py \
+            tools/tests/macos_symbolication_policy.py \
+            tools/tests/macos_universal2_assembly.py \
+            tools/tests/macos_universal2_runtime.py \
+            tools/tests/macos_universal2_release_candidate.py \
+            tools/tests/macos_metal_bridge.py \
+            tools/tests/macos_moltenvk_policy.py \
+            tools/tests/mp_bot_characters.py \
+            tools/tests/mp_bot_intelligence.py \
+            tools/tests/mp_bot_navigation.py \
+            tools/tests/mp_client_combat_effects.py \
+            tools/tests/multiview_demo.py \
+            tools/tests/mvd_server_api_contract.py \
+            tools/tests/native_glx_shutdown.py \
+            tools/tests/network_ipv4_support.py \
+            tools/tests/network_ipv6_support.py \
+            tools/tests/openq4_pure_pack.py \
+            tools/tests/packaging_safety.py \
+            tools/tests/preprocessor_macro_safety.py \
+            tools/tests/posix_memory_management.py \
+            tools/tests/posix_monotonic_time.py \
+            tools/tests/posix_network_resolution.py \
+            tools/tests/posix_thread_shutdown.py \
+            tools/tests/release_tooling_safety.py \
+            tools/tests/renderer_cel_shading.py \
+            tools/tests/renderer_mp_flat_items.py \
+            tools/tests/renderer_msaa_cvar_safety.py \
+            tools/tests/renderer_picmip_policy.py \
+            tools/tests/renderer_player_visibility.py \
+            tools/tests/renderer_screenshot_readback.py \
+            tools/tests/renderer_supersampling_safety.py \
+            tools/tests/renderer_vulkan_decal_compatibility.py \
+            tools/tests/renderer_vulkan_gui_residency.py \
+            tools/tests/renderer_vulkan_md5r_compatibility.py \
+            tools/tests/renderer_vulkan_shadow_compatibility.py \
+            tools/tests/renderer_vulkan_world_interaction_compatibility.py \
+            tools/tests/savegame_corruption_contract.py \
+            tools/tests/savegame_pointer_width_safety.py \
+            tools/tests/savegame_v3_contract.py \
+            tools/tests/sdl3_input_parity.py \
+            tools/tests/sdl3_multidisplay_windowing.py \
+            tools/tests/settings_menu_coverage.py \
+            tools/tests/steam_deck_support.py \
+            tools/tests/system_console_presentation.py \
+            tools/tests/startup_language_override.py \
+            tools/tests/ui_embedded_icons.py \
+            tools/tests/validation_hardening.py \
+            tools/tests/vk_shader_header_pin.py \
+            tools/tests/vscode_fast_build.py
+          bash -n tools/build/meson_setup.sh
+          bash -n tools/macos/collect_macos_support_info.sh
+          bash -n tools/validation/validate_macos_static.sh
+          bash -n tools/validation/validate_push.sh
+          bash -n tools/validation/validate_pr.sh
+          python tools/tests/arena_campaign.py
+          python tools/tests/async_drop_client_contract.py
+          python tools/tests/campaign_split_state_transition.py
+          python tools/tests/clang_tidy_input_safety.py
+          python tools/tests/cmdargs_append_contract.py
+          python tools/tests/competitive_match_layer.py
+          python tools/tests/competitive_match_localization.py
+          python tools/tests/decl_checksum_stability_contract.py
+          python tools/tests/match_control_localization_bridge.py
+          python tools/tests/match_control_ui_contract.py
+          python tools/tests/demo_playback.py
+          python tools/tests/docs_link_integrity.py
+          python tools/tests/fatal_error_startup_safety.py
+          python tools/tests/filesystem_case_segments.py
+          python tools/tests/filesystem_mod_manifest.py
+          python tools/tests/filesystem_write_qpath_safety.py
+          python tools/tests/game_class_allocator_alignment.py
+          python tools/tests/game_type_module_selection.py
+          python tools/tests/gamelibs_staging.py
+          python tools/tests/generated_animation_cache.py
+          python tools/tests/hdr_postprocess_math.py
+          python tools/tests/idstr_input_safety.py
+          python tools/tests/lexer_peek_contract.py
+          python tools/tests/key_bind_presentation.py
+          python tools/tests/levelshot_inventory.py
+          python tools/tests/linux_arm64_cross_compile.py
+          python tools/tests/linux_arm64_ci_coverage.py
+          python tools/tests/linux_arm64_release_evidence.py
+          python tools/tests/linux_arm64_source_portability.py
+          python tools/tests/linux_dedicated_server_smoke_contract.py
+          python tools/tests/linux_dedicated_stock_map_smoke_contract.py
+          python tools/tests/linux_physical_host_evidence_contract.py
+          python tools/tests/linux_wayland_stock_sp_smoke_contract.py
+          python tools/tests/linux_gui_presentation_defaults.py
+          python tools/tests/linux_highdpi_mouse.py
+          python tools/tests/linux_appimage_packaging.py
+          python tools/tests/lang_table_encoding.py
+          python tools/tests/source_charset_integrity.py
+          python tools/tests/linux_metadata_fuzz.py
+          python tools/tests/linux_packaging_guidance.py
+          python tools/tests/linux_pk4_legacy_tools.py
+          python tools/tests/linux_sanitizer_ci.py
+          python tools/tests/linux_sdl3_glew_loader.py
+          python tools/tests/linux_vsync_support.py
+          python tools/tests/linux_wayland_build_contract.py
+          python tools/tests/loading_continue_input.py
+          python tools/tests/loading_pacifier_pacing.py
+          python tools/tests/map_entity_strings.py
+          python tools/tests/macos_apple_gl21_arb2_corridor.py
+          python tools/tests/macos_dedicated_server_smoke_contract.py
+          python tools/tests/macos_evidence_plumbing.py
+          python tools/tests/macos_evidence_recording.py
+          python tools/tests/macos_gamelibs_alignment.py
+          python tools/tests/macos_intel_ci.py
+          python tools/tests/macos_local_validation_track.py
+          python tools/tests/macos_matrix_policy.py
+          python tools/tests/macos_native_backend_guard.py
+          python tools/tests/macos_native_backend_containment.py
+          python tools/tests/macos_openal_provider_policy.py
+          python tools/tests/macos_package_policy.py
+          python tools/tests/macos_package_robustness.py
+          python tools/tests/macos_renderer_backend_policy.py
+          python tools/tests/macos_renderer_phase_breadcrumbs.py
+          python tools/tests/macos_renderer_startup_guard.py
+          python tools/tests/macos_sanitizer_ci.py
+          python tools/tests/macos_sdl3_backend_guard.py
+          python tools/tests/macos_shadow_policy.py
+          python tools/tests/macos_signoff_archive.py
+          python tools/tests/macos_static_policy.py
+          python tools/tests/macos_support_claim_policy.py
+          python tools/tests/macos_support_intake.py
+          python tools/tests/macos_symbolication_policy.py
+          python tools/tests/macos_universal2_assembly.py
+          python tools/tests/macos_universal2_runtime.py
+          python tools/tests/macos_universal2_release_candidate.py
+          python tools/tests/macos_metal_bridge.py
+          python tools/tests/macos_moltenvk_policy.py
+          python tools/tests/mp_bot_characters.py
+          python tools/tests/mp_bot_intelligence.py
+          python tools/tests/mp_bot_navigation.py
+          python tools/tests/mp_client_combat_effects.py
+          python tools/tests/multiview_demo.py
+          python tools/tests/mvd_server_api_contract.py
+          python tools/tests/native_glx_shutdown.py
+          python tools/tests/network_ipv4_support.py
+          python tools/tests/network_ipv6_support.py
+          python tools/tests/openq4_pure_pack.py
+          python tools/tests/packaging_safety.py
+          python tools/tests/preprocessor_macro_safety.py
+          python tools/tests/release_tooling_safety.py
+          python tools/tests/posix_memory_management.py
+          python tools/tests/posix_monotonic_time.py
+          python tools/tests/posix_network_resolution.py
+          python tools/tests/posix_thread_shutdown.py
+          python tools/tests/renderer_cel_shading.py
+          python tools/tests/renderer_mp_flat_items.py
+          python tools/tests/renderer_msaa_cvar_safety.py
+          python tools/tests/renderer_picmip_policy.py
+          python tools/tests/renderer_player_visibility.py
+          python tools/tests/renderer_screenshot_readback.py
+          python tools/tests/renderer_supersampling_safety.py
+          python tools/tests/renderer_vulkan_decal_compatibility.py
+          python tools/tests/renderer_vulkan_gui_residency.py
+          python tools/tests/renderer_vulkan_md5r_compatibility.py
+          python tools/tests/renderer_vulkan_shadow_compatibility.py
+          python tools/tests/renderer_vulkan_world_interaction_compatibility.py
+          python tools/tests/savegame_corruption_contract.py
+          python tools/tests/savegame_pointer_width_safety.py
+          python tools/tests/savegame_v3_contract.py
+          python tools/tests/sdl3_input_parity.py
+          python tools/tests/sdl3_multidisplay_windowing.py
+          python tools/tests/settings_menu_coverage.py
+          python tools/tests/steam_deck_support.py
+          python tools/tests/system_console_presentation.py
+          python tools/tests/startup_language_override.py
+          python tools/tests/ui_embedded_icons.py
+          python tools/tests/validation_hardening.py
+          python tools/tests/vk_shader_header_pin.py
+          python tools/tests/vscode_fast_build.py
+
+      - name: Dry-run validation profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/validation/validate_push.sh --dry-run
+          bash tools/validation/validate_pr.sh --dry-run
+
+  windows-x64:
+    name: Windows x64 Commit Validation
+    runs-on: windows-2025
+    needs: script-smoke
+    timeout-minutes: 60
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch openQ4-game
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "$env:OPENQ4_GAMELIBS_REPO"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Prepare OpenAL Soft (Windows)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $outputRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp/openal-soft-x64"
+          $env:OPENQ4_VS_TARGET_ARCH = "x64"
+          powershell -ExecutionPolicy Bypass -File tools/build/prepare_windows_openal.ps1 -Architecture "x64" -OutputRoot $outputRoot
+          "OPENQ4_OPENAL_ROOT=$outputRoot" >> $env:GITHUB_ENV
+
+      - name: Run selected validation profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Selected validation profile: pr"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/validation/validate_pr.ps1 --fail-on-dirty
+
+      - name: Run focused input-safety static analysis
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python tools/analysis/clang_tidy_input_safety.py --build-dir .tmp/validation/pr-builddir
+
+  linux-arm64:
+    name: Linux ARM64 Commit Validation
+    runs-on: ubuntu-24.04-arm
+    needs: script-smoke
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Install Linux native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y \
+              binutils \
+              libasound2-dev \
+              libdbus-1-dev \
+              libdecor-0-dev \
+              libdrm-dev \
+              libegl1-mesa-dev \
+              libfribidi-dev \
+              libgbm-dev \
+              libgl1-mesa-dri \
+              libgl1-mesa-dev \
+              libglx-mesa0 \
+              libibus-1.0-dev \
+              libjack-dev \
+              libopenal-dev \
+              libpipewire-0.3-dev \
+              libpulse-dev \
+              libsndio-dev \
+              libthai-dev \
+              libudev-dev \
+              libwayland-dev \
+              libx11-dev \
+              libxcursor-dev \
+              libxext-dev \
+              libxfixes-dev \
+              libxi-dev \
+              libxkbcommon-dev \
+              libxrandr-dev \
+              libxss-dev \
+              libxtst-dev \
+              libxxf86dga-dev \
+              libxxf86vm-dev \
+              xvfb; then
+              exit 0
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Failed to install Linux native dependencies after ${attempt} attempts."
+              exit 1
+            fi
+
+            echo "Linux dependency installation attempt ${attempt} failed; retrying in 10 seconds..."
+            sleep 10
+          done
+
+      - name: Run selected validation profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          env LIBGL_ALWAYS_SOFTWARE=1 SDL_VIDEO_DRIVER=x11 SDL_VIDEODRIVER=x11 xvfb-run -a bash tools/validation/validate_pr.sh \
+            --fail-on-dirty \
+            --runtime \
+            --runtime-cases renderer-default-safety-selftest,renderer-shadow-planner-selftest,renderer-shadow-projected-diagnostic,sdl3-x11-display-diagnostics \
+            --runtime-tiers auto \
+            --runtime-basepath "" \
+            --runtime-skip-official-pak-validation
+          env LIBGL_ALWAYS_SOFTWARE=1 OPENQ4_FORCE_X11=1 xvfb-run -a python tools/tests/renderer_validation_matrix.py \
+            --cases sdl3-force-x11-display-diagnostics \
+            --tiers auto \
+            --basepath "" \
+            --skip-official-pak-validation \
+            --output-dir .tmp/renderer-validation/force-x11
+
+      - name: Run Linux ARM64 dedicated server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/linux_dedicated_server_smoke.py \
+            --output-root .tmp/linux-dedicated-smoke/arm64
+
+      - name: Publish Linux ARM64 dedicated server smoke
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-linux-arm64-dedicated-smoke
+          path: .tmp/linux-dedicated-smoke/arm64
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Publish renderer validation reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-linux-arm64-renderer-validation
+          path: .tmp/renderer-validation
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+  linux-sanitizer:
+    name: Linux x64 ASan+UBSan Commit Validation
+    runs-on: ubuntu-24.04
+    needs: script-smoke
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Install Linux native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y \
+              binutils \
+              libasound2-dev \
+              libdbus-1-dev \
+              libdecor-0-dev \
+              libdrm-dev \
+              libegl1-mesa-dev \
+              libfribidi-dev \
+              libgbm-dev \
+              libgl1-mesa-dri \
+              libgl1-mesa-dev \
+              libglx-mesa0 \
+              libibus-1.0-dev \
+              libjack-dev \
+              libopenal-dev \
+              libpipewire-0.3-dev \
+              libpulse-dev \
+              libsndio-dev \
+              libthai-dev \
+              libudev-dev \
+              libwayland-dev \
+              libx11-dev \
+              libxcursor-dev \
+              libxext-dev \
+              libxfixes-dev \
+              libxi-dev \
+              libxkbcommon-dev \
+              libxrandr-dev \
+              libxss-dev \
+              libxtst-dev \
+              libxxf86dga-dev \
+              libxxf86vm-dev \
+              weston; then
+              exit 0
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Failed to install Linux native dependencies after ${attempt} attempts."
+              exit 1
+            fi
+
+            echo "Linux dependency installation attempt ${attempt} failed; retrying in 10 seconds..."
+            sleep 10
+          done
+
+      - name: Run sanitizer build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/validation/validate_pr.sh \
+            --skip-python-tests \
+            --no-install \
+            --build-dir .tmp/validation/linux-sanitizer-builddir \
+            --buildtype debugoptimized \
+            --jobs 2 \
+            --extra-setup-arg=-Duse_pch=false \
+            --extra-setup-arg=-Db_sanitize=address,undefined
+
+      - name: Stage sanitizer runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh install \
+            -C .tmp/validation/linux-sanitizer-builddir \
+            --no-rebuild \
+            --skip-subprojects
+
+      - name: Run sanitizer native Wayland smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output_dir=".tmp/renderer-validation/sanitizer"
+          rm -rf "${output_dir}"
+          mkdir -p "${output_dir}"
+
+          export XDG_RUNTIME_DIR="${RUNNER_TEMP}/openq4-sanitizer-wayland-runtime"
+          rm -rf "${XDG_RUNTIME_DIR}"
+          mkdir -p "${XDG_RUNTIME_DIR}"
+          chmod 700 "${XDG_RUNTIME_DIR}"
+
+          weston_log="${output_dir}/weston.log"
+          weston --backend=headless-backend.so --socket=openq4-sanitizer-wayland --idle-time=0 --no-config >"${weston_log}" 2>&1 &
+          weston_pid=$!
+          cleanup() {
+            status=$?
+            if [ "${status}" -ne 0 ] && [ -f "${weston_log}" ]; then
+              echo "Weston log:"
+              cat "${weston_log}"
+            fi
+            kill "${weston_pid}" >/dev/null 2>&1 || true
+            wait "${weston_pid}" >/dev/null 2>&1 || true
+            exit "${status}"
+          }
+          trap cleanup EXIT
+
+          for attempt in {1..30}; do
+            if [ -S "${XDG_RUNTIME_DIR}/openq4-sanitizer-wayland" ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ ! -S "${XDG_RUNTIME_DIR}/openq4-sanitizer-wayland" ]; then
+            echo "Weston did not create the sanitizer Wayland socket."
+            exit 1
+          fi
+
+          export WAYLAND_DISPLAY=openq4-sanitizer-wayland
+          unset DISPLAY
+          export SDL_VIDEO_DRIVER=wayland
+          export SDL_VIDEODRIVER=wayland
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export OPENQ4_WAYLAND_DISABLE_LIBDECOR=1
+
+          python tools/tests/renderer_validation_matrix.py \
+            --cases sdl3-wayland-window-lifecycle \
+            --tiers auto \
+            --timeout 120 \
+            --basepath "" \
+            --skip-official-pak-validation \
+            --output-dir "${output_dir}"
+
+      - name: Publish sanitizer validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-linux-sanitizer-build-logs
+          path: |
+            .tmp/validation/linux-sanitizer-builddir/meson-logs
+            .tmp/gamelibs_stage/openq4_gamelibs_stage_manifest.json
+            .tmp/renderer-validation/sanitizer
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+  linux-wayland:
+    name: Linux ${{ matrix.arch_label }} ${{ matrix.compiler_label }} Wayland ${{ matrix.libdecor_label }} Commit Validation
+    runs-on: ${{ matrix.runner }}
+    needs: script-smoke
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_label: x64
+            runner: ubuntu-24.04
+            expected_uname: x86_64
+            compiler_label: GCC
+            cc: gcc
+            cxx: g++
+            libdecor_label: libdecor
+            disable_libdecor: "0"
+            prefer_libdecor: "1"
+            sync_window_ops: "0"
+            linux_x11: auto
+            artifact_suffix: x64-libdecor
+          - arch_label: x64
+            runner: ubuntu-24.04
+            expected_uname: x86_64
+            compiler_label: GCC
+            cc: gcc
+            cxx: g++
+            libdecor_label: no-libdecor
+            disable_libdecor: "1"
+            prefer_libdecor: "0"
+            sync_window_ops: "0"
+            linux_x11: disabled
+            artifact_suffix: x64-no-libdecor-wayland-only
+          - arch_label: x64
+            runner: ubuntu-24.04
+            expected_uname: x86_64
+            compiler_label: Clang
+            cc: clang
+            cxx: clang++
+            libdecor_label: no-libdecor
+            disable_libdecor: "1"
+            prefer_libdecor: "0"
+            sync_window_ops: "0"
+            linux_x11: disabled
+            artifact_suffix: x64-clang-no-libdecor-wayland-only
+          - arch_label: x64
+            runner: ubuntu-24.04
+            expected_uname: x86_64
+            compiler_label: GCC
+            cc: gcc
+            cxx: g++
+            libdecor_label: sync-window-ops
+            disable_libdecor: "0"
+            prefer_libdecor: "0"
+            sync_window_ops: "1"
+            linux_x11: auto
+            artifact_suffix: x64-sync-window-ops
+          - arch_label: ARM64
+            runner: ubuntu-24.04-arm
+            expected_uname: aarch64
+            compiler_label: GCC
+            cc: gcc
+            cxx: g++
+            libdecor_label: libdecor
+            disable_libdecor: "0"
+            prefer_libdecor: "1"
+            sync_window_ops: "0"
+            linux_x11: auto
+            artifact_suffix: arm64-libdecor
+          - arch_label: ARM64
+            runner: ubuntu-24.04-arm
+            expected_uname: aarch64
+            compiler_label: Clang
+            cc: clang
+            cxx: clang++
+            libdecor_label: no-libdecor
+            disable_libdecor: "1"
+            prefer_libdecor: "0"
+            sync_window_ops: "0"
+            linux_x11: disabled
+            artifact_suffix: arm64-clang-no-libdecor-wayland-only
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Install Clang
+        if: matrix.compiler_label == 'Clang'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Install Linux Wayland dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y \
+              binutils \
+              libasound2-dev \
+              libdbus-1-dev \
+              libdecor-0-dev \
+              libdrm-dev \
+              libegl1-mesa-dev \
+              libfribidi-dev \
+              libgbm-dev \
+              libgl1-mesa-dri \
+              libgl1-mesa-dev \
+              libglx-mesa0 \
+              libibus-1.0-dev \
+              libjack-dev \
+              libopenal-dev \
+              libpipewire-0.3-dev \
+              libpulse-dev \
+              libsndio-dev \
+              libthai-dev \
+              libudev-dev \
+              libwayland-dev \
+              libx11-dev \
+              libxcursor-dev \
+              libxext-dev \
+              libxfixes-dev \
+              libxi-dev \
+              libxkbcommon-dev \
+              libxrandr-dev \
+              libxss-dev \
+              libxtst-dev \
+              libxxf86dga-dev \
+              libxxf86vm-dev \
+              weston; then
+              exit 0
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Failed to install Linux Wayland dependencies after ${attempt} attempts."
+              exit 1
+            fi
+
+            echo "Linux Wayland dependency installation attempt ${attempt} failed; retrying in 10 seconds..."
+            sleep 10
+          done
+
+      - name: Run native Wayland validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export XDG_RUNTIME_DIR="${RUNNER_TEMP}/openq4-wayland-runtime"
+          rm -rf "${XDG_RUNTIME_DIR}"
+          mkdir -p "${XDG_RUNTIME_DIR}"
+          chmod 700 "${XDG_RUNTIME_DIR}"
+
+          weston_log="${RUNNER_TEMP}/openq4-weston-${{ matrix.artifact_suffix }}.log"
+          weston --backend=headless-backend.so --socket=openq4-wayland --idle-time=0 --no-config >"${weston_log}" 2>&1 &
+          weston_pid=$!
+          cleanup() {
+            status=$?
+            if [ "${status}" -ne 0 ] && [ -f "${weston_log}" ]; then
+              echo "Weston log:"
+              cat "${weston_log}"
+            fi
+            kill "${weston_pid}" >/dev/null 2>&1 || true
+            wait "${weston_pid}" >/dev/null 2>&1 || true
+            exit "${status}"
+          }
+          trap cleanup EXIT
+
+          for attempt in {1..30}; do
+            if [ -S "${XDG_RUNTIME_DIR}/openq4-wayland" ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ ! -S "${XDG_RUNTIME_DIR}/openq4-wayland" ]; then
+            echo "Weston did not create the Wayland socket."
+            exit 1
+          fi
+
+          export WAYLAND_DISPLAY=openq4-wayland
+          unset DISPLAY
+          if [ "$(uname -m)" != "${{ matrix.expected_uname }}" ]; then
+            echo "Unexpected runner architecture: $(uname -m); expected ${{ matrix.expected_uname }}."
+            exit 1
+          fi
+          export SDL_VIDEO_DRIVER=wayland
+          export SDL_VIDEODRIVER=wayland
+          export LIBGL_ALWAYS_SOFTWARE=1
+          if [ "${{ matrix.disable_libdecor }}" = "1" ]; then
+            export OPENQ4_WAYLAND_DISABLE_LIBDECOR=1
+          else
+            unset OPENQ4_WAYLAND_DISABLE_LIBDECOR
+          fi
+          if [ "${{ matrix.prefer_libdecor }}" = "1" ]; then
+            export OPENQ4_WAYLAND_PREFER_LIBDECOR=1
+          else
+            unset OPENQ4_WAYLAND_PREFER_LIBDECOR
+          fi
+          if [ "${{ matrix.sync_window_ops }}" = "1" ]; then
+            export OPENQ4_WAYLAND_SYNC_WINDOW_OPS=1
+          else
+            unset OPENQ4_WAYLAND_SYNC_WINDOW_OPS
+          fi
+
+          bash tools/validation/validate_pr.sh \
+            --build-dir builddir \
+            --fail-on-dirty \
+            --extra-setup-arg=-Dlinux_x11=${{ matrix.linux_x11 }}
+
+          sdl_config="$(find builddir -name SDL_build_config.h -print -quit)"
+          test -n "${sdl_config}"
+          grep -F '#define HAVE_LIBDECOR_H 1' "${sdl_config}"
+          grep -F '#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client.so.0"' "${sdl_config}"
+          grep -F '#define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_LIBDECOR "libdecor-0.so.0"' "${sdl_config}"
+          if [ "${{ matrix.linux_x11 }}" = "disabled" ]; then
+            grep -F '/* #undef SDL_VIDEO_DRIVER_X11 */' "${sdl_config}"
+            for binary in .install/openQ4-client_* .install/openQ4-ded_*; do
+              if readelf -W -d "${binary}" | grep -Eq 'libX11|libXext|libGLX'; then
+                echo "Native Wayland-only binary unexpectedly depends on X11/GLX: ${binary}"
+                exit 1
+              fi
+            done
+          fi
+
+          ld_debug_prefix="${RUNNER_TEMP}/openq4-wayland-loader-${{ matrix.artifact_suffix }}"
+          export LD_DEBUG=libs
+          export LD_DEBUG_OUTPUT="${ld_debug_prefix}"
+          python tools/tests/renderer_validation_matrix.py \
+            --cases renderer-default-safety-selftest,sdl3-wayland-window-lifecycle,sdl3-wayland-window-stress,sdl3-wayland-mouse-capture,sdl3-wayland-mouse-capture-stress,sdl3-wayland-display-diagnostics \
+            --tiers auto \
+            --basepath "" \
+            --skip-official-pak-validation
+          unset LD_DEBUG LD_DEBUG_OUTPUT
+
+          shopt -s nullglob
+          loader_logs=("${ld_debug_prefix}".*)
+          if [ "${#loader_logs[@]}" -eq 0 ]; then
+            echo "Dynamic-loader diagnostics were not produced."
+            exit 1
+          fi
+          if [ "${{ matrix.prefer_libdecor }}" = "1" ]; then
+            grep -hF 'libdecor-0.so.0' "${loader_logs[@]}" >/dev/null
+          elif [ "${{ matrix.disable_libdecor }}" = "1" ] && grep -hF 'libdecor-0.so.0' "${loader_logs[@]}" >/dev/null; then
+            echo "libdecor loaded despite OPENQ4_WAYLAND_DISABLE_LIBDECOR=1."
+            exit 1
+          fi
+
+      - name: Run Linux x64 dedicated server smoke
+        if: matrix.artifact_suffix == 'x64-libdecor'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/linux_dedicated_server_smoke.py \
+            --output-root .tmp/linux-dedicated-smoke/x64
+
+      - name: Publish Linux x64 dedicated server smoke
+        if: always() && matrix.artifact_suffix == 'x64-libdecor'
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-linux-x64-dedicated-smoke
+          path: .tmp/linux-dedicated-smoke/x64
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Publish renderer validation reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-linux-wayland-${{ matrix.artifact_suffix }}-renderer-validation
+          path: .tmp/renderer-validation
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+  macos-arm64:
+    name: macOS ARM64 ${{ matrix.bridge_label }} Commit Validation
+    runs-on: macos-15
+    needs: script-smoke
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bridge_label: OpenGL
+            macos_graphics_bridge: opengl
+            macos_openal_provider: apple_framework
+            artifact_suffix: opengl
+          - bridge_label: Metal
+            macos_graphics_bridge: metal
+            macos_openal_provider: apple_framework
+            artifact_suffix: metal
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Run selected validation profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/validation/validate_pr.sh \
+            --fail-on-dirty \
+            --platform-backend=sdl3 \
+            --extra-setup-arg=-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }} \
+            --extra-setup-arg=-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}
+
+      - name: Normalize ARM64 thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py prepare \
+            --install-root .install \
+            --arch arm64
+
+      - name: Run macOS dedicated server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/macos_dedicated_server_smoke.py \
+            --output-root .tmp/macos-dedicated-smoke/${{ matrix.artifact_suffix }}
+
+      - name: Stage pinned MoltenVK for ARM64 thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install
+
+      - name: Record macOS ARM64 thin-build provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py record \
+            --install-root .install \
+            --source-manifest .tmp/gamelibs_stage/openq4_gamelibs_stage_manifest.json \
+            --arch arm64 \
+            --graphics-bridge ${{ matrix.macos_graphics_bridge }} \
+            --openal-provider ${{ matrix.macos_openal_provider }} \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --build-type debug
+
+      - name: Publish macOS dedicated server smoke
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-macos-arm64-${{ matrix.artifact_suffix }}-dedicated-smoke
+          path: .tmp/macos-dedicated-smoke/${{ matrix.artifact_suffix }}
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Archive macOS ARM64 staged payload with modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload_archive=".tmp/macos-thin-payload/arm64-${{ matrix.artifact_suffix }}-payload.tar.gz"
+          mkdir -p "$(dirname "${payload_archive}")"
+          rm -f "${payload_archive}"
+          tar -C .install -czf "${payload_archive}" .
+          tar -tzf "${payload_archive}" >/dev/null
+
+      - name: Publish macOS ARM64 staged payload
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-macos-arm64-${{ matrix.artifact_suffix }}-payload
+          path: .tmp/macos-thin-payload/arm64-${{ matrix.artifact_suffix }}-payload.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+  macos-x64:
+    name: macOS Intel x64 ${{ matrix.bridge_label }} Commit Validation
+    runs-on: macos-15-intel
+    needs: script-smoke
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bridge_label: OpenGL
+            macos_graphics_bridge: opengl
+            macos_openal_provider: apple_framework
+            artifact_suffix: opengl
+          - bridge_label: Metal
+            macos_graphics_bridge: metal
+            macos_openal_provider: apple_framework
+            artifact_suffix: metal
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Intel host
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -m)" != "x86_64" ]]; then
+            echo "macOS Intel validation requires x86_64, found $(uname -m)."
+            exit 1
+          fi
+
+      - name: Fetch openQ4-game
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Run selected validation profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/validation/validate_pr.sh \
+            --fail-on-dirty \
+            --platform-backend=sdl3 \
+            --extra-setup-arg=-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }} \
+            --extra-setup-arg=-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}
+
+      - name: Normalize Intel thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py prepare \
+            --install-root .install \
+            --arch x64
+
+      - name: Run macOS dedicated server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/macos_dedicated_server_smoke.py \
+            --arch x64 \
+            --output-root .tmp/macos-dedicated-smoke/x64-${{ matrix.artifact_suffix }}
+
+      - name: Stage pinned MoltenVK for Intel thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install
+
+      - name: Record macOS Intel thin-build provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py record \
+            --install-root .install \
+            --source-manifest .tmp/gamelibs_stage/openq4_gamelibs_stage_manifest.json \
+            --arch x64 \
+            --graphics-bridge ${{ matrix.macos_graphics_bridge }} \
+            --openal-provider ${{ matrix.macos_openal_provider }} \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --build-type debug
+
+      - name: Publish macOS Intel dedicated server smoke
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-macos-x64-${{ matrix.artifact_suffix }}-dedicated-smoke
+          path: .tmp/macos-dedicated-smoke/x64-${{ matrix.artifact_suffix }}
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Archive macOS Intel staged payload with modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload_archive=".tmp/macos-thin-payload/x64-${{ matrix.artifact_suffix }}-payload.tar.gz"
+          mkdir -p "$(dirname "${payload_archive}")"
+          rm -f "${payload_archive}"
+          tar -C .install -czf "${payload_archive}" .
+          tar -tzf "${payload_archive}" >/dev/null
+
+      - name: Publish macOS Intel staged payload
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-macos-x64-${{ matrix.artifact_suffix }}-payload
+          path: .tmp/macos-thin-payload/x64-${{ matrix.artifact_suffix }}-payload.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+  macos-universal2:
+    # Pre-publication gate only; release artifacts remain arm64-only.
+    name: macOS universal2 ${{ matrix.bridge_label }} Assembly
+    runs-on: macos-15
+    needs:
+      - macos-arm64
+      - macos-x64
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bridge_label: OpenGL
+            artifact_suffix: opengl
+          - bridge_label: Metal
+            artifact_suffix: metal
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install release documentation dependency
+        run: python -m pip install markdown
+
+      - name: Download macOS ARM64 thin payload
+        uses: actions/download-artifact@v5
+        with:
+          name: commit-macos-arm64-${{ matrix.artifact_suffix }}-payload
+          path: .tmp/macos-universal2/${{ matrix.artifact_suffix }}/arm64
+
+      - name: Download macOS Intel thin payload
+        uses: actions/download-artifact@v5
+        with:
+          name: commit-macos-x64-${{ matrix.artifact_suffix }}-payload
+          path: .tmp/macos-universal2/${{ matrix.artifact_suffix }}/x64
+
+      - name: Restore mode-preserving thin payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2/${{ matrix.artifact_suffix }}"
+          for arch in arm64 x64; do
+            payload_archive="${corridor_root}/${arch}/${arch}-${{ matrix.artifact_suffix }}-payload.tar.gz"
+            if [ -L "${payload_archive}" ] || [ ! -f "${payload_archive}" ]; then
+              echo "Missing regular thin payload archive: ${payload_archive}"
+              exit 1
+            fi
+            tar -tzf "${payload_archive}" >/dev/null
+            tar -xzf "${payload_archive}" -C "${corridor_root}/${arch}"
+            rm -f "${payload_archive}"
+          done
+
+      - name: Assemble exact dual-slice staging tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2/${{ matrix.artifact_suffix }}"
+          mkdir -p "${corridor_root}/package-output"
+          python tools/build/assemble_macos_universal2.py assemble \
+            --arm64-root "${corridor_root}/arm64" \
+            --x64-root "${corridor_root}/x64" \
+            --output-root "${corridor_root}/universal2" \
+            --assembly-manifest "${corridor_root}/assembly-manifest.json"
+
+      - name: Run native universal2 dedicated-server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2/${{ matrix.artifact_suffix }}"
+          python tools/tests/macos_dedicated_server_smoke.py \
+            --install-root "${corridor_root}/universal2" \
+            --arch universal2 \
+            --output-root "${corridor_root}/dedicated-smoke"
+
+      - name: Package and validate universal2 app
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2/${{ matrix.artifact_suffix }}"
+          export OPENQ4_UNIVERSAL_INSTALL_ROOT="${corridor_root}/universal2"
+          release_version="$(python -c 'import json, os; print(json.load(open(os.path.join(os.environ["OPENQ4_UNIVERSAL_INSTALL_ROOT"], "baseoq4", "mod.json"), encoding="utf-8"))["version"])')"
+          python tools/build/package_nightly.py \
+            --platform macos \
+            --arch universal2 \
+            --version "${release_version}" \
+            --version-tag universal2-ci \
+            --source-root . \
+            --install-dir "${corridor_root}/universal2" \
+            --output-dir "${corridor_root}/package-output" \
+            --archive-format tar.xz \
+            --package-suffix=-${{ matrix.artifact_suffix }} \
+            --macos-signing-mode ad-hoc
+
+      - name: Publish universal2 assembly evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: commit-macos-universal2-${{ matrix.artifact_suffix }}
+          path: .tmp/macos-universal2/${{ matrix.artifact_suffix }}
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
